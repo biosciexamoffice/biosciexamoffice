@@ -1,34 +1,32 @@
-import mongoose from "mongoose";
+import mongoose, { Schema } from "mongoose";
 
+const studentSchema = new Schema({
+    surname: {
+        type: String,
+        required: [true, "Surname is required"],
+        trim: true,
+    },
+    firstname: {
+        type: String,
+        required: [true, "First name is required"],
+        trim: true,
+    },
+    middlename: {
+        type: String,
+        trim: true,
+    },
+    regNo: {
+        type: String,
+        required: [true, "Registration number is required"],
+        unique: true,
+        trim: true,
+        uppercase: true,
+    },
+    level: {
+        type: String,
+        required: [true, "Level is required"],
+        trim: true,
+    },
+}, { timestamps: true });
 
-const studentSchema = mongoose.Schema({
-    surname:{
-        type: String,
-        required: true
-    },
-    firstname:{
-        type: String,
-        required: true
-    },
-    middlename:{
-        type: String,
-        
-    },
-    regNo:{
-        type: String,
-        required: true,
-        unique: true
-
-    },
-    level:{
-        type: String,
-        required: true
-    },
-    department:{
-        type: String,
-        required: true
-    },
-})
-
-export default mongoose.model('Student', studentSchema);
-
+export default mongoose.model("Student", studentSchema);

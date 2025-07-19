@@ -13,7 +13,7 @@ const lecturerController = express.Router()
 lecturerController.get('/', getAllLecturer)
 lecturerController.post('/', CreateLecturer)
 lecturerController.get('/:id', getLecturerById)
-lecturerController.put('/:id', updateLecturer)
+lecturerController.patch('/:id', updateLecturer)
 lecturerController.delete('/:id', deleteLecturer)
 
 export default lecturerController;

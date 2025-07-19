@@ -3,16 +3,20 @@ import Course from "../models/course.js";
 export const createCourse = async (req, res) => {
   try {
     // Note: The field in your schema is 'lecturer', not 'lecturerId'
-    const { title, code, unit, session, semester, year, lecturer } = req.body;
+    const { title, 
+      code, 
+      unit, 
+      semester, 
+      option,
+      level, } = req.body;
 
     const newCourse = await Course.create({
       title,
       code,
       unit,
-      session,
       semester,
-      year,
-      lecturer,
+      option,
+      level
     });
 
     res.status(201).json(newCourse);

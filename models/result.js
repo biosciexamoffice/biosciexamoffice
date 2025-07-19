@@ -1,51 +1,81 @@
-
 import mongoose, {Schema} from "mongoose";
 
 const resultSchema = new Schema({
-    course:{
+    course: {
         type: Schema.Types.ObjectId,
         ref: 'Course',
         required: true,
-
     },
-    student:{
+    student: {
         type: Schema.Types.ObjectId,
         ref: "Student",
         required: true
     },
-    lecturer:{
+    lecturer: {
         type: Schema.Types.ObjectId,
         ref: "Lecturer",
         required: true
     },
-    q1:{
+    department:{
+        type: String,
+        required: true
+    },
+    session: {
+        type: String,
+        required: true
+    },
+    semester: {
+        type: Number,
+        enum: [1, 2],
+        required: true
+    },
+    date: {
+        type: Date,
+        required: true
+    },
+    level: {
+        type: String,
+        required: true
+    },
+    q1: {
         type: Number,
     },
-    q2:{
+    q2: {
         type: Number,
     },
-    q3:{
+    q3: {
         type: Number,
     },
-    q4:{
+    q4: {
         type: Number,
     },
-    q5:{
+    q5: {
         type: Number,
     },
-    q6:{
+    q6: {
         type: Number,
     },
-    q7:{
+    q7: {
         type: Number,
     },
-    q8:{
+    q8: {
         type: Number,
+    },
+    totalexam: {
+        type: Number,
+    },
+    ca: {
+        type: Number,
+    },
+    grandtotal: {
+        type: Number,
+        required: true
     },
     grade: {
         type: String,
-        enum: ['A', 'B', 'C', 'D', 'F'],
+        enum: ['A', 'B', 'C', 'D', 'E', 'F'],
         required: true
+        
     }
 });
 

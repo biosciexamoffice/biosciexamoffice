@@ -14,25 +14,25 @@ const courseSchema = Schema({
         type: Number,
         required: true
     },
+    level:{
+        type: String,
+        required: true
+    },
     lecturer:{
         type: Schema.Types.ObjectId,
         ref: 'Lecturer',
     
     },
-    session:{
+    option:{
         type: String,
+        enum:["C", "E"],
         required: true
-    
     },
     semester:{
         type: Number,
         enum: [1,2],
         required: true
     },
-    year:{
-        type: Number,
-        required: true
-    }
 
 })
 
