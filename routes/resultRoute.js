@@ -6,7 +6,8 @@ import {
     getResultById,
     updateResult,
     deleteResult,
-    deleteAllResultsForCourse
+  deleteAllResultsForCourse,
+    deleteMultipleResults
   } from "../controllers/resultController.js";
 
   import { uploadResults } from '../controllers/uploadResultController.js';
@@ -18,10 +19,16 @@ const resultRouter = express.Router();
 
 resultRouter.post("/", createResult);
 resultRouter.get("/", getAllResults);
+
+// 🔁 Place before `/:id`
+resultRouter.delete("/bulk", deleteMultipleResults); // ← move this up
+resultRouter.delete("/course/:id", deleteAllResultsForCourse);
+
 resultRouter.get("/:id", getResultById);
 resultRouter.patch("/:id", updateResult);
-resultRouter.delete("/:id", deleteResult);
-resultRouter.delete("/course/:id", deleteAllResultsForCourse)
-resultRouter.post('/upload', upload.single('csvFile'), uploadResults);
+resultRouter.delete("/:id", deleteResult); // ← dynamic route LAST
 
-export default resultRouter;
+resultRouter.post('/upload', upload.single('csvFile'), uploadResults)
+
+
+export default resultRouter

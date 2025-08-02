@@ -17,6 +17,7 @@ import courseRouter from "./routes/courseRoute.js";
 import lecturerController from "./routes/lectureRoute.js";
 import resultRouter from "./routes/resultRoute.js";
 import academicMetricsRouter from './routes/academicMetricsRoute.js'
+import approvedCoursesrouter from '././routes/approvedCoursesRoute.js'
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -90,6 +91,7 @@ app.use('/api/courses', courseRouter);
 app.use('/api/lecturers', lecturerController);
 app.use('/api/results', resultRouter);
 app.use('/api/academic-metrics', academicMetricsRouter)
+app.use('/api/approvedCourses', approvedCoursesrouter )
 
 // 404 Handler
 app.use((req, res) => {

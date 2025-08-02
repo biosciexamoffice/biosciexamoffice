@@ -1,18 +1,18 @@
-// Helper function (same as before)
 function calculateAcademicMetrics(courses, previousData = {}) {
   const gradePoints = { 'A': 5, 'B': 4, 'C': 3, 'D': 2, 'E': 1, 'F': 0 };
-  
+
   const currentSemester = { TCC: 0, TCE: 0, TPE: 0 };
-  
+
   courses.forEach(course => {
     const unit = course.unit || 0;
     const grade = (course.grade || '').toUpperCase();
-    const point = gradePoints[grade] || 0;
-    
+    const point = gradePoints[grade] ?? 0;  // Use nullish coalescing in case point is 0
+
     currentSemester.TCC += unit;
     currentSemester.TPE += unit * point;
-    
-    if (['A', 'B', 'C', 'D'].includes(grade)) {
+
+    // Now includes 'E' as a pass
+    if (['A', 'B', 'C', 'D', 'E'].includes(grade)) {
       currentSemester.TCE += unit;
     }
   });

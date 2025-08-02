@@ -22,14 +22,14 @@ export const upload = multer({ storage });
 
 export const uploadResults = async (req, res) => {
   try {
-    const { courseCode, lecturerStaffId, session, semester, date, department } = req.body;
-
+    const { courseCode, lecturerStaffId, session, semester, date, department, level } = req.body;
+    console.log(courseCode, lecturerStaffId, session, semester, date, department, level )
     if (!req.file) {
       return res.status(400).json({ message: 'No CSV file uploaded' });
     }
-    if (!courseCode || !lecturerStaffId || !session || !semester || !date || !department) {
+    if (!courseCode || !lecturerStaffId || !session || !semester || !date || !department || !level) {
       return res.status(400).json({ 
-        message: 'Course, Lecturer, Session, Semester, Department, and Date are required.' 
+        message: 'Course, Lecturer, Session, Semester, Department, level, and Date are required.' 
       });
     }
     
@@ -82,8 +82,8 @@ export const uploadResults = async (req, res) => {
         }
 
         // Calculate grandtotal and grade
-        const grandtotal = row.grandtotal 
-          ? Math.round(Number(row.grandtotal)) 
+        const grandtotal = row.grandTotal 
+          ? Math.round(Number(row.grandTotal)) 
           : (totalexam || 0) + (ca || 0);
         const grade = calculateGrade(grandtotal);
 
@@ -96,7 +96,7 @@ export const uploadResults = async (req, res) => {
             semester,
             date,
             department,
-            level: row.level,
+            level,
             ...(row.q1 && { q1: Number(row.q1) }),
             ...(row.q2 && { q2: Number(row.q2) }),
             ...(row.q3 && { q3: Number(row.q3) }),
