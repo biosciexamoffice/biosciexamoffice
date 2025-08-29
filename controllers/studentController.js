@@ -22,7 +22,7 @@ export const CreateStudent=async(req, res)=>{
 
 export const getAllStudent= async(req, res)=>{
     try {
-        const allStudent = await Student.find()
+        const allStudent = await Student.find().sort({ regNoNumeric: 1, regNoSuffix: 1 });
         res.status(200).json(allStudent)
     } catch (error) {
         console.error("error fecthing doc", error)
@@ -78,7 +78,10 @@ export const updateStudent = async(req, res)=>{
         res.status(400).json({
             error: "Invalid Student ID"
         })
-      } else{
+      } else if(error.code === 11000){
+        res.status(400).json({error:`Duplicate Matric Number Detected! with ${error.keyValue.regNo}`})
+      }
+      else{
         res.status(500).json({
             error: "Internal Server Error"
         })

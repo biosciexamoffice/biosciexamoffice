@@ -37,6 +37,11 @@ const resultSchema = new Schema({
         type: String,
         required: true
     },
+    resultType: {
+        type: String,
+        enum: ["CORE", "CARRYOVER"],
+        required: true
+    },
     q1: {
         type: Number,
     },
@@ -76,6 +81,10 @@ const resultSchema = new Schema({
         enum: ['A', 'B', 'C', 'D', 'E', 'F'],
         required: true
         
+    },
+    moderated:{
+        type: Boolean,
+        default: false
     }
 });
 

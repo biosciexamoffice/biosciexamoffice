@@ -2,9 +2,14 @@ import mongoose, { Schema } from "mongoose";
 
 
 const sessionSchema = new Schema({
+    
+    sessionTitle:{
+        type: String,
+        required: [true, "Sesssion Title is required!"]
+    },
     startDate: {
         type: Date,
-        required: true
+        required: [true, "Session Start date is required!"]
     },
     endDate: {
         type: Date,
@@ -12,20 +17,21 @@ const sessionSchema = new Schema({
     },
     dean: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Lecturer'
+        ref: 'Lecturer',
+        required: [true, "Dean is required!"],
+        
     },
     hod: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Lecturer'
+        ref: 'Lecturer',
+        required: [true, "HOD is required!"]
     },
     eo: {
         type: mongoose.Schema.ObjectId,
-        ref: 'Lecturer'
+        ref: 'Lecturer',
+        required: [true, "EO is required!"]
     },
-    setSession: {
-        type: String,
-        required: true
-    }
+    
 })
 
-export default mongoose("Session", sessionSchema)
+export default mongoose.model("Session", sessionSchema)

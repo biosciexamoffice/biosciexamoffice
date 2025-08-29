@@ -17,7 +17,11 @@ import courseRouter from "./routes/courseRoute.js";
 import lecturerController from "./routes/lectureRoute.js";
 import resultRouter from "./routes/resultRoute.js";
 import academicMetricsRouter from './routes/academicMetricsRoute.js'
-import approvedCoursesrouter from '././routes/approvedCoursesRoute.js'
+import approvedCoursesrouter from './routes/approvedCoursesRoute.js'
+import resultsExportRouter from './routes/resultsExport.routes.js';
+import sessionRouter from './routes/sessionRoute.js';
+import graduationRouter from './routes/graduationRoutes.js';
+import courseRegistrationRouter from './routes/courseRegistrationRoute.js';
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -28,7 +32,9 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' })); // For form data
 
 // CORS Configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
-  'http://localhost:5173'
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175'
   // Add production URL when needed
 ];
 
@@ -91,7 +97,12 @@ app.use('/api/courses', courseRouter);
 app.use('/api/lecturers', lecturerController);
 app.use('/api/results', resultRouter);
 app.use('/api/academic-metrics', academicMetricsRouter)
-app.use('/api/approvedCourses', approvedCoursesrouter )
+app.use('/api/approvedCourses', approvedCoursesrouter)
+app.use('/api/results-export', resultsExportRouter);
+app.use('/api/sessions', sessionRouter);
+app.use('/api/graduation', graduationRouter);
+app.use('/api/course-registration', courseRegistrationRouter);
+
 
 // 404 Handler
 app.use((req, res) => {

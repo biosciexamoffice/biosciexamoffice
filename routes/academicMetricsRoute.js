@@ -4,7 +4,8 @@ import {
   getComprehensiveResults,
   getMetrics,
   deleteMetrics,
-  searchMetrics
+  searchMetrics,
+  updateMetrics
 } from '../controllers/academicMetricsController.js';
 
 const academicMetricsRouter = express.Router();
@@ -14,5 +15,6 @@ academicMetricsRouter.get('/comprehensive', getComprehensiveResults);
 academicMetricsRouter.get('/', getMetrics);
 academicMetricsRouter.delete('/:metricsId', deleteMetrics)
 academicMetricsRouter.get('/search', searchMetrics);
+academicMetricsRouter.put('/:metricsId', updateMetrics);
 
 export default academicMetricsRouter;

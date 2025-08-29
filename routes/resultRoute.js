@@ -28,7 +28,7 @@ resultRouter.get("/:id", getResultById);
 resultRouter.patch("/:id", updateResult);
 resultRouter.delete("/:id", deleteResult); // ← dynamic route LAST
 
-resultRouter.post('/upload', upload.single('csvFile'), uploadResults)
+resultRouter.post('/upload-results', upload, uploadResults);
 
 
 export default resultRouter

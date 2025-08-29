@@ -40,6 +40,10 @@ const ApprovedCoursesSchema = new Schema({
       required: true
     }
   ],
+  registrationsByLevel: [{
+  level: { type: String, required: true },            // '100' | '200' | ...
+  students: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Student' }]
+}],
   
   dateApproved: {
     type: Date,
@@ -51,8 +55,7 @@ const ApprovedCoursesSchema = new Schema({
 
 // Corrected compound index
 ApprovedCoursesSchema.index(
-  { college: 1, session: 1, semester: 1, level: 1 },
-  { unique: true, name: 'unique_approval' }
+  { college: 1, session: 1, semester: 1, level: 1 }
 );
 
 // Removed the pre-save hook as it won't work with ObjectId references

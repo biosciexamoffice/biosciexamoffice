@@ -1,174 +1,201 @@
+// controllers/academicMetrics.controller.js
 import AcademicMetrics from '../models/academicMetrics.js';
 import Result from '../models/result.js';
 import Student from '../models/student.js';
+import Course from '../models/course.js';
+import CourseRegistration from '../models/courseRegistration.js';
 import calculateAcademicMetrics from '../utills/calculateAcademicMetrics.js';
 import mongoose from 'mongoose';
+
+// Preload registrations for the cohort once: studentId -> Set(courseId)
+async function preloadRegistrations(session, semester, level) {
+  const sem = Number(semester);
+  const lvl = String(level);
+
+  const regs = await CourseRegistration.aggregate([
+    { $match: { session, semester: sem, level: lvl } },
+    { $unwind: '$student' },
+    { $group: { _id: '$student', courses: { $addToSet: '$course' } } },
+  ]);
+
+  const regByStudent = new Map();
+  const allCourseIds = new Set();
+  regs.forEach((r) => {
+    const sid = String(r._id);
+    const set = new Set(r.courses.map((id) => String(id)));
+    regByStudent.set(sid, set);
+    set.forEach((cid) => allCourseIds.add(cid));
+  });
+
+  // Basic course info for any registered course (unit/code/title)
+  const courses = await Course.find({ _id: { $in: [...allCourseIds] } })
+    .select('_id unit code title')
+    .lean();
+
+  const courseInfo = new Map(courses.map((c) => [String(c._id), c]));
+  return { regByStudent, courseInfo };
+}
 
 export const getComprehensiveResults = async (req, res) => {
   try {
     const { session, semester, level } = req.query;
 
-    // Validate required parameters
     if (!session || !semester || !level) {
-      return res.status(400).json({
-        error: 'Session, semester and level are required parameters'
-      });
+      return res.status(400).json({ error: 'Session, semester and level are required parameters' });
     }
 
-    // 1. Get all results with populated student and course data
-    const results = await Result.find({ session, semester, level })
+    // 1) Load actual result rows for this cohort
+    const results = await Result.find({
+      session,
+      semester: Number(semester),
+      level: String(level),
+    })
       .populate('student')
       .populate('course')
       .lean();
 
-    // Filter out invalid results
-    const validResults = results.filter(result => result.student && result.course);
-
-    const filteredCount = results.length - validResults.length;
-    if (filteredCount > 0) {
-      console.warn(`Filtered out ${filteredCount} invalid results with missing references`);
-    }
-
-    if (validResults.length === 0) {
+    const validResults = results.filter((r) => r.student && r.course);
+    if (!validResults.length) {
       return res.json({ students: [], courses: [] });
     }
 
-    // 2. Process student and course data using Maps
-    const studentsMap = new Map();
-    const coursesMap = new Map();
+    // 2) Build maps from results
+    const studentsMap = new Map(); // studentId -> { id, fullName, regNo, results(Map), ... }
+    const coursesMap = new Map();  // courseId  -> { id, code, unit, title }
 
-    validResults.forEach(result => {
-      const studentId = result.student._id.toString();
-      const courseId = result.course._id.toString();
+    validResults.forEach((r) => {
+      const sid = String(r.student._id);
+      const cid = String(r.course._id);
 
-      if (!studentsMap.has(studentId)) {
-        studentsMap.set(studentId, {
-          id: studentId,
-          fullName: `${result.student.surname} ${result.student.firstname} ${result.student.middlename || ''}`.trim(),
-          regNo: result.student.regNo,
-          results: new Map(),
-          studentCourses: []
+      if (!studentsMap.has(sid)) {
+        studentsMap.set(sid, {
+          id: sid,
+          fullName: `${r.student.surname} ${r.student.firstname} ${r.student.middlename || ''}`.trim(),
+          regNo: r.student.regNo,
+          results: new Map(), // ONLY real results go here (UI reads this)
         });
       }
 
-      if (!coursesMap.has(courseId)) {
-        coursesMap.set(courseId, {
-          id: courseId,
-          code: result.course.code,
-          unit: result.course.unit,
-          title: result.course.title
-        });
+      if (!coursesMap.has(cid)) {
+        coursesMap.set(cid, { id: cid, code: r.course.code, unit: r.course.unit, title: r.course.title });
       }
 
-      const student = studentsMap.get(studentId);
-      student.results.set(courseId, {
-        grandtotal: result.grandtotal,
-        grade: result.grade,
-        unit: result.course.unit
+      // store the real result (UI uses this map)
+      studentsMap.get(sid).results.set(cid, {
+        grandtotal: r.grandtotal,
+        grade: r.grade,
+        unit: r.course.unit,
       });
     });
 
-    // 3. Build studentCourses arrays
-    studentsMap.forEach(student => {
-      student.studentCourses = Array.from(student.results.values()).map(res => ({
-        unit: res.unit,
-        grade: res.grade
-      }));
-    });
+    // 3) Bring in registrations (to count 00 as F for metrics)
+    const { regByStudent, courseInfo } = await preloadRegistrations(session, semester, level);
 
-    // 4. Process metrics for each student
+    // include registered-only courses in the courses list so columns can appear if needed
+    for (const info of courseInfo.values()) {
+      const cid = String(info._id);
+      if (!coursesMap.has(cid)) {
+        coursesMap.set(cid, { id: cid, code: info.code, unit: info.unit, title: info.title });
+      }
+    }
+
+    // 4) Build response students + compute/update metrics
     const students = await Promise.all(
-      Array.from(studentsMap.values()).map(async (student) => {
-        const existingMetrics = await AcademicMetrics.findOne({
-          student: student.id,
-          session,
-          semester,
-          level
-        }).lean();
+      [...studentsMap.values()].map(async (stu) => {
+        // Attempted courses for metrics = every registered course this term
+        const regSet = regByStudent.get(stu.id) || new Set();
+        const attempted = [];
 
-        if (existingMetrics) {
-          return {
-            id: student.id,
-            fullName: student.fullName,
-            regNo: student.regNo,
-            results: Object.fromEntries(student.results),
-            previousMetrics: existingMetrics.previousMetrics || {
-              CCC: 0, CCE: 0, CPE: 0, CGPA: 0
-            },
-            currentMetrics: {
-              TCC: existingMetrics.TCC,
-              TCE: existingMetrics.TCE,
-              TPE: existingMetrics.TPE,
-              GPA: existingMetrics.GPA
-            },
-            metrics: existingMetrics
-          };
+        for (const cid of regSet) {
+          const real = stu.results.get(cid); // real result, if any
+          if (real) {
+            attempted.push({ unit: Number(real.unit) || 0, grade: String(real.grade || 'F') });
+          } else {
+            // registered but no score -> treat as F for metrics
+            const info = courseInfo.get(cid);
+            attempted.push({ unit: Number(info?.unit) || 0, grade: 'F' });
+          }
         }
 
-        // 2. Find previous metrics document
-        const previousMetricsDoc = await AcademicMetrics.findOne({
-          student: student.id,
-          $or: [
-            { session: { $lt: session } },
-            { session, semester: { $lt: semester } }
-          ]
+        // If student somehow had results but no registration match, we still
+        // want to count the result courses as attempted (edge-case protection).
+        if (!regSet.size) {
+          for (const [cid, real] of stu.results.entries()) {
+            attempted.push({ unit: Number(real.unit) || 0, grade: String(real.grade || 'F') });
+          }
+        }
+
+        // Get previous cumulative snapshot
+        const previousDoc = await AcademicMetrics.findOne({
+          student: stu.id,
+          $or: [{ session: { $lt: session } }, { session, semester: { $lt: Number(semester) } }],
         })
-        .sort({ session: -1, semester: -1, level: -1 })
-        .lean();
+          .sort({ session: -1, semester: -1, level: -1 })
+          .lean();
 
-        const previousMetrics = previousMetricsDoc ? {
-          CCC: previousMetricsDoc.CCC,
-          CCE: previousMetricsDoc.CCE,
-          CPE: previousMetricsDoc.CPE,
-          CGPA: previousMetricsDoc.CGPA
-        } : { CCC: 0, CCE: 0, CPE: 0, CGPA: 0 };
+        const previousMetrics = previousDoc
+          ? {
+              CCC: previousDoc.CCC,
+              CCE: previousDoc.CCE,
+              CPE: previousDoc.CPE,
+              CGPA: previousDoc.CGPA,
+            }
+          : { CCC: 0, CCE: 0, CPE: 0, CGPA: 0 };
 
-        // 3. Calculate current metrics correctly
-        const currentMetrics = calculateAcademicMetrics(student.studentCourses, previousMetrics);
+        // Compute this term + cumulative (attempted includes "00 -> F")
+        const current = calculateAcademicMetrics(attempted, previousMetrics);
 
-        const updatedMetrics = await AcademicMetrics.findOneAndUpdate(
-          { student: student.id, session, semester, level },
+        // Persist/Upsert the per-term metrics doc
+        const updated = await AcademicMetrics.findOneAndUpdate(
+          {
+            student: stu.id,
+            session,
+            semester: Number(semester),
+            level: String(level),
+          },
           {
             $set: {
-              ...currentMetrics,
-              previousMetrics
-            }
+              ...current,
+              previousMetrics,
+            },
           },
           { new: true, upsert: true }
         );
 
         return {
-          id: student.id,
-          fullName: student.fullName,
-          regNo: student.regNo,
-          results: Object.fromEntries(student.results),
+          id: stu.id,
+          fullName: stu.fullName,
+          regNo: stu.regNo,
+          // IMPORTANT: Only real results go to the UI (so "00" still renders as just 00)
+          results: Object.fromEntries(stu.results),
           previousMetrics,
           currentMetrics: {
-            TCC: currentMetrics.TCC,
-            TCE: currentMetrics.TCE,
-            TPE: currentMetrics.TPE,
-            GPA: currentMetrics.GPA
+            TCC: current.TCC,
+            TCE: current.TCE,
+            TPE: current.TPE,
+            GPA: current.GPA,
           },
-          metrics: updatedMetrics
+          metrics: updated,
         };
       })
     );
 
-    // 5. Send response
     res.json({
       students,
-      courses: Array.from(coursesMap.values())
+      courses: [...coursesMap.values()],
     });
-
   } catch (error) {
     console.error('Error in getComprehensiveResults:', error);
     res.status(500).json({
       error: 'Failed to fetch comprehensive results',
       details: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 };
+
+// The rest of your metrics controller (getMetrics, deleteMetrics, searchMetrics, updateMetrics) stays unchanged.
+
 
 // GET all metrics
 export const getMetrics = async (req, res) => {
@@ -255,9 +282,9 @@ export const searchMetrics = async (req, res) => {
       id: metric.student._id,
       fullName: `${metric.student.surname} ${metric.student.firstname} ${metric.student.middlename || ''}`.trim(),
       regNo: metric.student.regNo,
-      session,
-      semester,
-      level,
+      session: metric.session,
+      semester: metric.semester,
+      level: metric.level,
       previousMetrics: metric.previousMetrics,
       currentMetrics: {
         TCC: metric.TCC,
@@ -280,6 +307,40 @@ export const searchMetrics = async (req, res) => {
     console.error('Error in searchMetrics:', error);
     res.status(500).json({
       error: 'Failed to search metrics',
+      details: error.message
+    });
+  }
+};
+
+// UPDATE academic metrics
+export const updateMetrics = async (req, res) => {
+  try {
+    const { metricsId } = req.params;
+    const updateData = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(metricsId)) {
+      return res.status(400).json({ error: 'Invalid metrics ID' });
+    }
+
+    const updatedMetrics = await AcademicMetrics.findByIdAndUpdate(
+      metricsId,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedMetrics) {
+      return res.status(404).json({ error: 'Metrics not found' });
+    }
+
+    res.status(200).json({
+      message: 'Academic metrics updated successfully',
+      updatedMetrics
+    });
+
+  } catch (error) {
+    console.error('Error updating academic metrics:', error);
+    res.status(500).json({
+      error: 'Failed to update academic metrics',
       details: error.message
     });
   }

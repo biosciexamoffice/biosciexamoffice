@@ -33,6 +33,9 @@ const courseSchema = Schema({
         enum: [1,2],
         required: true
     },
+    uamId: {
+        type: String,
+    }
 
 })
 

@@ -9,7 +9,7 @@ const connectDB = async () =>{
         await mongoose.connect(process.env.MONGO_URL)
         console.log("Local Db connected")
     } catch (error) {
-        console.error('Databse Connection Failed', error.messsage)
+        console.error('Database Connection Failed:', error.message)
         process.exit(1)
     }
 }

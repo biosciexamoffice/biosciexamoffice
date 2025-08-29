@@ -100,7 +100,7 @@ export const uploadCourses = async (req, res) => {
 
       courseDocs.push({
         title: row.title.trim(),
-        code: row.code.trim().toUpperCase(), // Standardize course codes
+        code: row.code.trim().replace(/\s+/g, '').toUpperCase(), // Standardize course codes
         unit: Number(row.unit),
         option: row.option.toUpperCase(),
         semester: Number(semester),
