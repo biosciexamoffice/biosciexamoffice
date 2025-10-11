@@ -10,7 +10,7 @@ const academicMetricsSchema = new mongoose.Schema({
   session: {
     type: String,
     required: true,
-    enum: ['2022/2023', '2023/2024', '2024/2025']
+    match: [/^\d{4}\/\d{4}$/, 'Session must look like 2023/2024'],
   },
   semester: {
     type: Number,
@@ -95,6 +95,29 @@ const academicMetricsSchema = new mongoose.Schema({
       type: Number,
       default: 0
     }
+  },
+  ceoApproval: {
+    approved: {
+      type: Boolean,
+      default: false,
+    },
+    flagged: {
+      type: Boolean,
+      default: false,
+    },
+    name: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    note: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    updatedAt: {
+      type: Date,
+    },
   },
 }, {
   timestamps: true,

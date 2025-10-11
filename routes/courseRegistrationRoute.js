@@ -1,7 +1,11 @@
 import express from 'express';
 import multer from 'multer';
-import { uploadCourseRegistrations } from '../controllers/courseRegistrationUpload.controller.js';
-import { searchCourseRegistrations } from '../controllers/courseRegistrationUpload.controller.js';
+import { uploadCourseRegistrations,searchCourseRegistrations,       // (your existing detailed-by-course endpoint; optional)
+  listRegistrationCourses,         // NEW: list courses with counts
+  getRegistrationStudents,         // NEW: list students in a course
+  deleteRegisteredStudent,
+   moveRegisteredStudents,
+} from '../controllers/courseRegistrationUpload.controller.js';
 //import { uploadCourseRegistrations, searchCourseRegistrations } from '../controllers/uploadCourseRegistrations.js';
 
 const courseRegistrationRouter = express.Router();
@@ -19,13 +23,19 @@ const upload = multer({
       'text/csv',
       'application/csv',
       'text/plain',
-      'application/vnd.ms-excel'
+      'application/vnd.ms-excel',
+      'application/pdf'
     ];
     
-    if (allowedMimes.includes(file.mimetype) || file.originalname.toLowerCase().endsWith('.csv')) {
+    const lowerName = file.originalname.toLowerCase();
+    if (
+      allowedMimes.includes(file.mimetype) ||
+      lowerName.endsWith('.csv') ||
+      lowerName.endsWith('.pdf')
+    ) {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV files are allowed'), false);
+      cb(new Error('Only CSV or PDF files are allowed'), false);
     }
   }
 });
@@ -57,5 +67,8 @@ courseRegistrationRouter.post(
 );
 
 courseRegistrationRouter.get('/registrations/search', searchCourseRegistrations);
-
+courseRegistrationRouter.get('/registrations/courses', listRegistrationCourses);
+courseRegistrationRouter.get('/registrations/students', getRegistrationStudents);
+courseRegistrationRouter.delete('/registrations/student', deleteRegisteredStudent);
+courseRegistrationRouter.post('/registrations/move', moveRegisteredStudents);
 export default courseRegistrationRouter;

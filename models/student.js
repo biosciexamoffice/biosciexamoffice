@@ -48,6 +48,27 @@ const studentSchema = new Schema({
         type: String,
         enum: ['undergraduate', 'graduated', 'extraYear'],
         default: 'undergraduate',
+    },
+    standing: {
+        type: String,
+        enum: ['goodstanding', 'deferred', 'withdrawn', 'readmitted'],
+        default: 'goodstanding',
+        lowercase: true,
+        trim: true,
+    },
+    standingEvidence: {
+        documentPath: { type: String },
+        documentName: { type: String },
+        documentNumber: { type: String },
+        updatedAt: { type: Date }
+    },
+    passport: {
+        data: {
+            type: Buffer,
+            select: false
+        },
+        contentType: { type: String },
+        updatedAt: { type: Date }
     }
 }, { timestamps: true });
 

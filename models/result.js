@@ -85,6 +85,28 @@ const resultSchema = new Schema({
     moderated:{
         type: Boolean,
         default: false
+    },
+    moderationStatus: {
+        type: String,
+        enum: ['none', 'pending', 'approved'],
+        default: 'none'
+    },
+    moderationPendingGrandtotal: {
+        type: Number,
+    },
+    moderationOriginalGrandtotal: {
+        type: Number,
+    },
+    moderationApprovedAt: {
+        type: Date,
+    },
+    moderationProof: {
+        type: String,
+        default: ""
+    },
+    moderationAuthorizedPfNo: {
+        type: String,
+        default: ""
     }
 });
 

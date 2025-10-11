@@ -18,6 +18,10 @@ const courseSchema = Schema({
         type: String,
         required: true
     },
+    host: {
+        type: String,
+        required: true
+    },
     lecturer:{
         type: Schema.Types.ObjectId,
         ref: 'Lecturer',

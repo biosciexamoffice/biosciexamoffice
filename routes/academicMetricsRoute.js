@@ -5,8 +5,12 @@ import {
   getMetrics,
   deleteMetrics,
   searchMetrics,
-  updateMetrics
+  updateMetrics,
+  recomputeTermMetrics,
+  computeStudentTermMetrics,
 } from '../controllers/academicMetricsController.js';
+import { uploadOldMetricsMulter, uploadOldMetrics } from '../controllers/uploadAcademicMetricsController.js';
+
 
 const academicMetricsRouter = express.Router();
 
@@ -16,5 +20,8 @@ academicMetricsRouter.get('/', getMetrics);
 academicMetricsRouter.delete('/:metricsId', deleteMetrics)
 academicMetricsRouter.get('/search', searchMetrics);
 academicMetricsRouter.put('/:metricsId', updateMetrics);
+academicMetricsRouter.post('/recompute', recomputeTermMetrics);
+academicMetricsRouter.get('/compute-student', computeStudentTermMetrics);
+academicMetricsRouter.post('/upload-old', uploadOldMetricsMulter, uploadOldMetrics);
 
 export default academicMetricsRouter;

@@ -22,6 +22,7 @@
     "helmet": "^8.1.0",
     "mongoose": "^8.16.1",
     "multer": "^2.0.1",
-    "passport": "^0.7.0"
+    "passport": "^0.7.0",
+    "pdf-parse": "^1.1.1"
   }
 }

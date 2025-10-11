@@ -1,10 +1,13 @@
 // controllers/result.controller.js
 import Result from "../models/result.js";
 import Course from "../models/course.js";
+import Student from "../models/student.js";
+import Lecturer from "../models/lecturer.js";
 import CourseRegistration from "../models/courseRegistration.js";
 import calculateAcademicMetrics from '../utills/calculateAcademicMetrics.js';
 import AcademicMetrics from '../models/academicMetrics.js';
 import mongoose from 'mongoose';
+
 
 // === helper: letter grade from numeric total ===
 function gradeFromScore(score) {
@@ -72,8 +75,127 @@ async function computeAttemptedCourses(studentId, session, semester, level) {
 // Create
 export const createResult = async (req, res) => {
   try {
-    const newResult = await Result.create(req.body);
-    res.status(201).json(newResult);
+    const {
+      course,             // ObjectId string
+      studentRegNo,       // Reg No
+      lecturerStaffId,    // PF No
+      department,
+      session,
+      semester,
+      date,
+      level,
+      resultType,
+      // detailed inputs (optional)
+      q1, q2, q3, q4, q5, q6, q7, q8,
+      ca,
+      // optional simple input
+      grandtotal,
+      // optional incoming grade (ignored; we recompute)
+      grade
+    } = req.body;
+
+    // --- required fields sanity ---
+    if (!course || !studentRegNo || !lecturerStaffId || !department || !session || !semester || !date || !level || !resultType) {
+      return res.status(400).json({ message: "Missing required fields." });
+    }
+
+    // --- resolve course/student/lecturer ---
+    const courseDoc = await Course.findById(course).select("_id unit").lean();
+    if (!courseDoc) return res.status(404).json({ message: "Course not found." });
+
+    const student = await Student.findOne({ regNo: studentRegNo }).select("_id level").lean();
+    if (!student) return res.status(404).json({ message: `Student with regNo "${studentRegNo}" not found.` });
+
+    const lecturer = await Lecturer.findOne({ pfNo: lecturerStaffId }).select("_id").lean();
+    if (!lecturer) return res.status(404).json({ message: `Lecturer with staff ID "${lecturerStaffId}" not found.` });
+
+    const n = (v) => (v === undefined || v === null || v === "" ? undefined : Math.round(Number(v)));
+
+    // Detect which fields were actually sent (so we can distinguish 0 vs not provided)
+    const hasKey = (k) => Object.prototype.hasOwnProperty.call(req.body, k) && req.body[k] !== "" && req.body[k] !== null;
+
+    const qValsRaw = { q1, q2, q3, q4, q5, q6, q7, q8 };
+    const hasAnyQ  = Object.keys(qValsRaw).some((k) => hasKey(k));
+    const hasCA    = hasKey('ca');
+    const hasGrand = hasKey('grandtotal');
+
+    // Normalize numbers only for provided fields
+    const qNums = {};
+    for (const k of ['q1','q2','q3','q4','q5','q6','q7','q8']) {
+      if (hasKey(k)) qNums[k] = Math.max(0, Number(n(qValsRaw[k]) || 0));
+    }
+    const caNumProvided = hasCA ? Math.max(0, Number(n(ca) || 0)) : undefined;
+    const grandProvided = hasGrand ? Math.min(100, Math.max(0, Number(n(grandtotal) || 0))) : undefined;
+
+    // === Mode selection ===
+    // SIMPLE: grandtotal provided AND no CA AND no Q’s → trust grand total
+    // DETAILED: otherwise, compute from CA + Q’s (missing pieces default to 0)
+    let payload = {
+      course: courseDoc._id,
+      student: student._id,
+      lecturer: lecturer._id,
+      department: String(department),
+      session: String(session),
+      semester: Number(semester),
+      date: new Date(date),
+      level: String(level),
+      resultType: String(resultType),
+    };
+
+    if (hasGrand && !hasCA && !hasAnyQ) {
+      // ----- SIMPLE MODE -----
+      const gt = grandProvided ?? 0; // already clamped 0..100
+      const gradeAuto = gradeFromScore(gt);
+
+      payload = {
+        ...payload,
+        grandtotal: gt,
+        grade: gradeAuto,
+        // deliberately DO NOT set ca/totalexam/q1..q8
+      };
+
+    } else {
+      // ----- DETAILED MODE -----
+      // Use 0 for any missing question values in computation
+      const qSum = ['q1','q2','q3','q4','q5','q6','q7','q8']
+        .reduce((acc, k) => acc + (qNums[k] ?? 0), 0);
+
+      // clamp exam and CA
+      const examClamped = Math.min(70, Math.max(0, qSum));
+      const caClamped   = Math.min(30, Math.max(0, caNumProvided ?? 0));
+
+      // validations (only in detailed mode)
+      if (caClamped > 30) {
+        return res.status(400).json({ message: "CA must be between 0 and 30" });
+      }
+      if (examClamped > 70) {
+        return res.status(400).json({ message: "Exam total must be between 0 and 70" });
+      }
+
+      const grand = Math.min(100, caClamped + examClamped);
+      const gradeAuto = gradeFromScore(grand);
+
+      // Only store Q fields that were actually sent (and non-zero is optional — up to you)
+      payload = {
+        ...payload,
+        ...(qNums.q1 !== undefined ? { q1: qNums.q1 } : {}),
+        ...(qNums.q2 !== undefined ? { q2: qNums.q2 } : {}),
+        ...(qNums.q3 !== undefined ? { q3: qNums.q3 } : {}),
+        ...(qNums.q4 !== undefined ? { q4: qNums.q4 } : {}),
+        ...(qNums.q5 !== undefined ? { q5: qNums.q5 } : {}),
+        ...(qNums.q6 !== undefined ? { q6: qNums.q6 } : {}),
+        ...(qNums.q7 !== undefined ? { q7: qNums.q7 } : {}),
+        ...(qNums.q8 !== undefined ? { q8: qNums.q8 } : {}),
+        ca: caClamped,
+        totalexam: examClamped,
+        grandtotal: grand,
+        grade: gradeAuto,
+      };
+    }
+
+    const newResult = await Result.create(payload);
+    console.log(newResult)
+    return res.status(201).json(newResult);
   } catch (error) {
     console.error("Error creating result:", error);
     if (error.name === "ValidationError") {
@@ -155,6 +277,8 @@ export const getAllResults = async (req, res) => {
       $project: {
         _id: 1, department: 1, session: 1, semester: 1, level: 1,
         grade: 1, totalexam: 1, ca: 1, grandtotal: 1, moderated: 1,
+        moderationStatus: 1, moderationPendingGrandtotal: 1, moderationOriginalGrandtotal: 1, moderationApprovedAt: 1,
+        moderationProof: 1, moderationAuthorizedPfNo: 1,
         q1: 1, q2: 1, q3: 1, q4: 1, q5: 1, q6: 1, q7: 1, q8: 1,
         student: {
           _id: '$studentInfo._id',
@@ -219,33 +343,130 @@ export const updateResult = async (req, res) => {
     const payload = req.body || {};
     const hasGrand = Object.prototype.hasOwnProperty.call(payload, 'grandtotal');
     const hasGrade = Object.prototype.hasOwnProperty.call(payload, 'grade');
+    const hasModerationProof = Object.prototype.hasOwnProperty.call(payload, 'moderationProof');
+    const hasModerationPfNo = Object.prototype.hasOwnProperty.call(payload, 'moderationAuthorizedPfNo');
+    const hasModerationGrand = Object.prototype.hasOwnProperty.call(payload, 'moderationGrandtotal');
+    const moderationAction = typeof payload.moderationAction === 'string'
+      ? payload.moderationAction.trim().toLowerCase()
+      : null;
 
-    // Apply changes
+    // Direct updates to grand total (outside moderation approval flow)
     if (hasGrand) {
       const gtNum = Number(payload.grandtotal);
       if (Number.isNaN(gtNum)) {
         return res.status(400).json({ message: "grandtotal must be a number" });
       }
       result.grandtotal = gtNum;
+
+      // Reset moderation state on manual edits
+      result.moderated = false;
+      result.moderationStatus = 'none';
+      result.moderationPendingGrandtotal = undefined;
+      result.moderationOriginalGrandtotal = undefined;
+      result.moderationApprovedAt = undefined;
     }
 
+    // Direct grade updates (outside moderation approval flow)
     if (hasGrade) {
-      // Accept explicit letter; if client sent "auto", compute from (new) grandtotal
       const g = String(payload.grade || '').toUpperCase();
       result.grade = (g === 'AUTO' || g === '')
         ? gradeFromScore(result.grandtotal)
         : g;
+
+      result.moderated = false;
+      if (result.moderationStatus !== 'pending') {
+        result.moderationStatus = 'none';
+        result.moderationPendingGrandtotal = undefined;
+        result.moderationOriginalGrandtotal = undefined;
+        result.moderationApprovedAt = undefined;
+      }
     } else if (hasGrand) {
       // If total changed but grade not sent, keep consistency by recomputing grade
       result.grade = gradeFromScore(result.grandtotal);
     }
 
-    // Flip moderated if any moderation-ish field changed or explicitly requested
-    if (payload.moderated === true || hasGrand || hasGrade) {
-      result.moderated = true;
-    } else if (payload.moderated === false) {
-      // allow unmarking if you want that behavior; remove this branch to make it sticky
+    if (hasModerationGrand) {
+      const proposed = Number(payload.moderationGrandtotal);
+      if (Number.isNaN(proposed)) {
+        return res.status(400).json({ message: "moderationGrandtotal must be a number" });
+      }
+
+      const proofProvided = String(payload.moderationProof ?? '').trim();
+      const pfProvided = String(payload.moderationAuthorizedPfNo ?? '').trim();
+      if (!proofProvided || !pfProvided) {
+        return res.status(400).json({ message: "Provide proof and authorizing PF No to submit moderation." });
+      }
+
+      if (result.moderationStatus !== 'pending') {
+        result.moderationOriginalGrandtotal = result.grandtotal;
+      }
+
+      result.moderationPendingGrandtotal = proposed;
+      result.moderationStatus = 'pending';
       result.moderated = false;
+      result.moderationApprovedAt = undefined;
+      result.moderationProof = proofProvided;
+      result.moderationAuthorizedPfNo = pfProvided;
+    } else {
+      if (hasModerationProof) {
+        result.moderationProof = String(payload.moderationProof ?? '').trim();
+      }
+      if (hasModerationPfNo) {
+        result.moderationAuthorizedPfNo = String(payload.moderationAuthorizedPfNo ?? '').trim();
+      }
+    }
+
+    if (moderationAction) {
+      if (!['approve', 'reject'].includes(moderationAction)) {
+        return res.status(400).json({ message: `Unknown moderationAction "${moderationAction}"` });
+      }
+
+      if (moderationAction === 'approve') {
+        if (result.moderationStatus !== 'pending') {
+          return res.status(400).json({ message: "No pending moderation request to approve." });
+        }
+        const pendingGrand = result.moderationPendingGrandtotal;
+        if (pendingGrand === undefined || pendingGrand === null) {
+          return res.status(400).json({ message: "Pending moderation is missing a proposed grand total." });
+        }
+
+        const proofCurrent = String(result.moderationProof ?? '').trim();
+        const pfCurrent = String(result.moderationAuthorizedPfNo ?? '').trim();
+        if (!proofCurrent || !pfCurrent) {
+          return res.status(400).json({ message: "Moderation proof and authorizer PF No must be recorded before approval." });
+        }
+
+        result.grandtotal = pendingGrand;
+        result.grade = gradeFromScore(pendingGrand);
+        result.moderationStatus = 'approved';
+        result.moderated = true;
+        result.moderationApprovedAt = new Date();
+        result.moderationPendingGrandtotal = undefined;
+      } else if (moderationAction === 'reject') {
+        if (result.moderationStatus === 'pending') {
+          result.moderationStatus = 'none';
+          result.moderated = false;
+          result.moderationPendingGrandtotal = undefined;
+          result.moderationOriginalGrandtotal = undefined;
+          result.moderationApprovedAt = undefined;
+          result.moderationProof = "";
+          result.moderationAuthorizedPfNo = "";
+        } else if (result.moderationStatus === 'approved') {
+          const original = result.moderationOriginalGrandtotal;
+          if (original === undefined || original === null) {
+            return res.status(400).json({ message: "Cannot unapprove because original score is unavailable." });
+          }
+          result.grandtotal = original;
+          result.grade = gradeFromScore(original);
+          result.moderated = false;
+          result.moderationStatus = 'none';
+          result.moderationPendingGrandtotal = undefined;
+          result.moderationOriginalGrandtotal = undefined;
+          result.moderationApprovedAt = undefined;
+          result.moderationProof = "";
+          result.moderationAuthorizedPfNo = "";
+        }
+      }
     }
 
     // Persist the result first (validates enum grade etc.)

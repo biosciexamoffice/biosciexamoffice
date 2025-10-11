@@ -9,6 +9,8 @@ import passport from 'passport';
 import helmet from 'helmet';
 import cors from 'cors';
 import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { upload } from './controllers/uploadCourseController.js'; // Import your multer config
 
 import connectDB from "./config/mongoDB.js";
@@ -22,6 +24,10 @@ import resultsExportRouter from './routes/resultsExport.routes.js';
 import sessionRouter from './routes/sessionRoute.js';
 import graduationRouter from './routes/graduationRoutes.js';
 import courseRegistrationRouter from './routes/courseRegistrationRoute.js';
+import registrationFormsRouter from './routes/registrationForms.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -87,6 +93,8 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Database Connection
 connectDB();
 
@@ -102,7 +110,7 @@ app.use('/api/results-export', resultsExportRouter);
 app.use('/api/sessions', sessionRouter);
 app.use('/api/graduation', graduationRouter);
 app.use('/api/course-registration', courseRegistrationRouter);
-
+app.use('/api/registration-forms', registrationFormsRouter);
 
 // 404 Handler
 app.use((req, res) => {
@@ -131,7 +139,8 @@ app.use((err, req, res, next) => {
     });
   }
 
-  res.status(500).json({
+  const status = err.statusCode || 500;
+  res.status(status).json({
     success: false, 
     error: err.message || 'Internal Server Error'
   });
