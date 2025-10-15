@@ -52,7 +52,8 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' })); // For form data
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
   'http://localhost:5173',
   'http://localhost:5174',
-  'http://localhost:5175'
+  'http://localhost:5175',
+  'https://biosciexamoffice-frontend.onrender.com'
   // Add production URL when needed
 ];
 
@@ -88,7 +89,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
-      mongoUrl: process.env.MONGO_SESSION_URL || process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL,
+      mongoUrl: process.env.MONGO_SESSION_URL || process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/examoffice_sessions',
       collectionName: 'sessions',
       ttl: 24 * 60 * 60 // 24 hours
     }),

@@ -24,13 +24,15 @@ const connectDB = async () => {
     }
 
     cachedMode = (process.env.DB_MODE || 'PRIMARY').toUpperCase();
-    const primaryUri = process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL;
-    if (!primaryUri) {
-      throw new Error('Missing MONGO_PRIMARY_URL (or legacy MONGO_URL) environment variable.');
+    const primaryUri = process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/examoffice';
+    if (!process.env.MONGO_PRIMARY_URL && !process.env.MONGO_URL) {
+      console.warn('MONGO_PRIMARY_URL/MONGO_URL not set. Falling back to mongodb://127.0.0.1:27017/examoffice');
     }
 
     const commonOptions = {
       maxPoolSize: Number(process.env.MONGO_POOL_SIZE || 10),
+      serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 30000),
+      connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 30000),
     };
 
     const readPreference = isReadOnlyMode() ? 'secondaryPreferred' : 'primary';

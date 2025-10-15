@@ -2,9 +2,10 @@ import { isReadOnlyMode } from '../config/mongoDB.js';
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const WHITELIST = [
-  /^\/api\/auth\/?.*/,
-  /^\/api\/env\/?.*/,
-  /^\/api\/health\/?.*/,
+  /^\/api\/auth\b.*/,
+  /^\/auth\b.*/,
+  /^\/api\/env\b.*/,
+  /^\/api\/health\b.*/,
 ];
 
 const readOnlyGuard = (req, res, next) => {
@@ -16,7 +17,7 @@ const readOnlyGuard = (req, res, next) => {
     return next();
   }
 
-  const path = req.path || '';
+  const path = req.originalUrl || req.path || '';
   const isWhitelisted = WHITELIST.some((pattern) => pattern.test(path));
   if (isWhitelisted) {
     return next();
