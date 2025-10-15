@@ -7,7 +7,12 @@ const CourseRegistrationSchema = new Schema({
   semester: { type: Number, required: true, enum: [1, 2], index: true },
 
   // explicitly stored level
-  level:    { type: String, required: true, enum: ['100','200','300','400'], index: true },
+  level:    { type: String, required: true, enum: ['100','200','300','400','500'], index: true },
+
+  college: { type: Schema.Types.ObjectId, ref: 'College', required: true, index: true },
+  department: { type: Schema.Types.ObjectId, ref: 'Department', required: true, index: true },
+  programme: { type: Schema.Types.ObjectId, ref: 'Programme', required: true, index: true },
+  programmeType: { type: String, required: true, trim: true },
 
   // all registered students for this document
   student: [{ type: Schema.Types.ObjectId, ref: 'Student' }],

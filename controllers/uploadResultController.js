@@ -6,6 +6,7 @@ import Course from "../models/course.js";
 import Lecturer from "../models/lecturer.js";
 import Result from "../models/result.js";
 import PassFail from "../models/passFailList.js";
+import { ensureUserCanAccessDepartment } from '../services/accessControl.js';
 
 function calculateGrade(score) {
   if (typeof score !== 'number') return 'F';
@@ -78,7 +79,8 @@ export const uploadResults = async (req, res) => {
             .on('error', reject);
         });
 
-        const course = await Course.findOne({ code: courseCode });
+        const course = await Course.findOne({ code: courseCode })
+          .select('_id code title department college programme programmeType');
         if (!course) {
           allFailedRecords.push(...rows.map(row => ({
             error: `Course with code "${courseCode}" not found.`,
@@ -87,6 +89,8 @@ export const uploadResults = async (req, res) => {
           })));
           continue;
         }
+
+        ensureUserCanAccessDepartment(req.user, course.department, course.college);
 
         const processingResults = await Promise.allSettled(
           rows.map(async row => {

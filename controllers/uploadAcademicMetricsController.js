@@ -96,9 +96,10 @@ export const uploadOldMetrics = async (req, res) => {
           if (!regNo) throw new Error('Missing "Reg No"');
 
         
-            const student = await Student.findOne({ regNo });
-            
+          const student = await Student.findOne({ regNo });
           if (!student) throw new Error(`Student not found: ${regNo}`);
+
+          ensureUserCanAccessDepartment(req.user, student.department, student.college);
 
           const previousMetrics = {
             CCC: num(rec.p_CCC),

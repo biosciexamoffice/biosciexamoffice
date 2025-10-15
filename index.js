@@ -13,10 +13,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { upload } from './controllers/uploadCourseController.js'; // Import your multer config
 
-import connectDB from "./config/mongoDB.js";
+import connectDB, { getDbMode, isReadOnlyMode } from "./config/mongoDB.js";
+import configurePassport from './config/passport.js';
 import studentRoute from "./routes/studentRoute.js";
 import courseRouter from "./routes/courseRoute.js";
 import lecturerController from "./routes/lectureRoute.js";
+import collegeRouter from './routes/collegeRoute.js';
+import departmentRouter from './routes/departmentRoute.js';
 import resultRouter from "./routes/resultRoute.js";
 import academicMetricsRouter from './routes/academicMetricsRoute.js'
 import approvedCoursesrouter from './routes/approvedCoursesRoute.js'
@@ -25,6 +28,15 @@ import sessionRouter from './routes/sessionRoute.js';
 import graduationRouter from './routes/graduationRoutes.js';
 import courseRegistrationRouter from './routes/courseRegistrationRoute.js';
 import registrationFormsRouter from './routes/registrationForms.js';
+import authRouter from './routes/authRoute.js';
+import approvalRouter from './routes/approvalRoute.js';
+import programmeRouter from './routes/programmeRoute.js';
+import syncRouter from './routes/syncRoute.js';
+import { backfillStudentInstitution } from './utils/studentBackfill.js';
+import { backfillCourseInstitution } from './utils/courseBackfill.js';
+import { backfillApprovedCoursesInstitution } from './utils/approvedCoursesBackfill.js';
+import { backfillCourseRegistrationInstitution } from './utils/courseRegistrationBackfill.js';
+import readOnlyGuard from './middlewares/readOnlyGuard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,7 +88,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
-      mongoUrl: process.env.MONGO_URL,
+      mongoUrl: process.env.MONGO_SESSION_URL || process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL,
       collectionName: 'sessions',
       ttl: 24 * 60 * 60 // 24 hours
     }),
@@ -90,6 +102,7 @@ app.use(
 );
 
 // Initialize passport
+configurePassport(passport);
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -98,10 +111,23 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Database Connection
 connectDB();
 
+// Lightweight environment probe
+app.get('/api/env', (_req, res) => {
+  res.json({
+    mode: getDbMode(),
+    readOnly: isReadOnlyMode(),
+  });
+});
+
+// Apply read-only guard after lightweight routes/health checks
+app.use(readOnlyGuard);
+
 // Routes
 app.get('/', (req, res) => res.json({ status: "healthy" }));
 app.use('/api/students', studentRoute);
 app.use('/api/courses', courseRouter);
+app.use('/api/departments', departmentRouter);
+app.use('/api/colleges', collegeRouter);
 app.use('/api/lecturers', lecturerController);
 app.use('/api/results', resultRouter);
 app.use('/api/academic-metrics', academicMetricsRouter)
@@ -110,7 +136,11 @@ app.use('/api/results-export', resultsExportRouter);
 app.use('/api/sessions', sessionRouter);
 app.use('/api/graduation', graduationRouter);
 app.use('/api/course-registration', courseRegistrationRouter);
+app.use('/api/programmes', programmeRouter);
 app.use('/api/registration-forms', registrationFormsRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/approvals', approvalRouter);
+app.use('/api/sync', syncRouter);
 
 // 404 Handler
 app.use((req, res) => {
@@ -147,8 +177,31 @@ app.use((err, req, res, next) => {
 });
 
 // Start Server
-mongoose.connection.once('open', () => {
-  app.listen(PORT, () => 
+mongoose.connection.once('open', async () => {
+  if (String(process.env.RUN_BACKFILL || '').toLowerCase() === 'true') {
+    try {
+      const updated = await backfillStudentInstitution();
+      if (updated > 0) {
+        console.log(`Backfilled ${updated} student record(s) with default institution data.`);
+      }
+      const coursesUpdated = await backfillCourseInstitution();
+      if (coursesUpdated > 0) {
+        console.log(`Backfilled ${coursesUpdated} course record(s) with default institution data.`);
+      }
+      const approvedUpdated = await backfillApprovedCoursesInstitution();
+      if (approvedUpdated > 0) {
+        console.log(`Backfilled ${approvedUpdated} approved course document(s) with default institution data.`);
+      }
+      const registrationsUpdated = await backfillCourseRegistrationInstitution();
+      if (registrationsUpdated > 0) {
+        console.log(`Backfilled ${registrationsUpdated} course registration document(s) with default institution data.`);
+      }
+    } catch (err) {
+      console.error('Failed to backfill institution data:', err);
+    }
+  }
+
+  app.listen(PORT, () =>
     console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'}`)
   );
 });

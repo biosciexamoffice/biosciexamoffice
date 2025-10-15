@@ -13,9 +13,12 @@ import {
   import { uploadResults } from '../controllers/uploadResultController.js';
 
 import { upload } from '../controllers/uploadResultController.js';
+import { authenticate } from '../middlewares/authMiddleware.js';
   
 
 const resultRouter = express.Router();
+
+resultRouter.use(authenticate);
 
 resultRouter.post("/", createResult);
 resultRouter.get("/", getAllResults);

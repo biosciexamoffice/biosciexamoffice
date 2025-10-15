@@ -6,8 +6,11 @@ import {
   updateApprovedCourses,
   deleteApprovedCourses
 } from '../controllers/approvedCoursesController.js';
+import { authenticate } from '../middlewares/authMiddleware.js';
 
 const approvedCoursesrouter = express.Router();
+
+approvedCoursesrouter.use(authenticate);
 
 approvedCoursesrouter.route('/')
   .post(createApprovedCourses)  // Create approved courses

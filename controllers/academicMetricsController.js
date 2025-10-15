@@ -6,8 +6,39 @@ import Course from '../models/course.js';
 import CourseRegistration from '../models/courseRegistration.js';
 import calculateAcademicMetrics from '../utills/calculateAcademicMetrics.js';
 import mongoose from 'mongoose';
+import {
+  buildDepartmentScopeFilter,
+  ensureResourceMatchesUserScope,
+  ensureUserCanAccessDepartment,
+} from '../services/accessControl.js';
+
+const DEFAULT_DEPARTMENT_NAME = 'Biochemistry';
+const DEFAULT_COLLEGE_NAME = 'Biological Science';
 
 const normalizeRegNo = (value) => String(value || '').trim().toUpperCase();
+
+const normalizeOfficerApproval = (approval = {}) => ({
+  approved: Boolean(approval?.approved),
+  flagged: Boolean(approval?.flagged),
+  name: approval?.name || '',
+  title: approval?.title || '',
+  surname: approval?.surname || '',
+  firstname: approval?.firstname || '',
+  middlename: approval?.middlename || '',
+  department: approval?.department || '',
+  college: approval?.college || '',
+  note: approval?.note || '',
+  updatedAt: approval?.updatedAt || null,
+});
+
+const resolveDepartmentScope = (user) => {
+  const filter = buildDepartmentScopeFilter(user);
+  const departmentId = filter.department || null;
+  return {
+    departmentId,
+    departmentObjectId: departmentId ? new mongoose.Types.ObjectId(departmentId) : null,
+  };
+};
 
 /** ---------------------------
  * Session helpers (dynamic)
@@ -163,8 +194,15 @@ export const getComprehensiveResults = async (req, res) => {
     const lvlStr = String(level);    // Result/CourseRegistration store level as String
 
     // 1) Pull registrations for this term: studentId -> Set(courseId)
+    const { departmentId, departmentObjectId } = resolveDepartmentScope(req.user);
+
+    const registrationMatch = { session, semester: semNum, level: lvlStr };
+    if (departmentObjectId) {
+      registrationMatch.department = departmentObjectId;
+    }
+
     let regs = await CourseRegistration.aggregate([
-      { $match: { session, semester: semNum, level: lvlStr } },
+      { $match: registrationMatch },
       { $unwind: '$student' },
       { $group: { _id: '$student', courses: { $addToSet: '$course' } } },
     ]);
@@ -199,8 +237,13 @@ export const getComprehensiveResults = async (req, res) => {
     const courseInfo = new Map(courseDocs.map((c) => [String(c._id), c]));
 
     // 3) Student info (name/regNo) for registered students
-    const studentDocs = await Student.find({ _id: { $in: [...allStudentIds] } })
-      .select('_id surname firstname middlename regNo standing status')
+    const studentQuery = { _id: { $in: [...allStudentIds] } };
+    if (departmentId) {
+      studentQuery.department = departmentId;
+    }
+
+    const studentDocs = await Student.find(studentQuery)
+      .select('_id surname firstname middlename regNo standing status department')
       .lean();
     const studentInfo = new Map(studentDocs.map((s) => [String(s._id), s]));
 
@@ -293,7 +336,7 @@ export const getComprehensiveResults = async (req, res) => {
       semester: semNum,
       level: lvlNum,
     })
-      .select('student TCC TCE TPE GPA CCC CCE CPE CGPA previousMetrics')
+      .select('student TCC TCE TPE GPA CCC CCE CPE CGPA previousMetrics ceoApproval hodApproval deanApproval')
       .lean();
 
     const metricsByStudent = new Map(
@@ -379,13 +422,9 @@ export const getComprehensiveResults = async (req, res) => {
         _id: m?._id, // client uses this for updates
       };
 
-      const ceoApproval = {
-        approved: Boolean(m?.ceoApproval?.approved),
-        flagged: Boolean(m?.ceoApproval?.flagged),
-        name: m?.ceoApproval?.name || '',
-        note: m?.ceoApproval?.note || '',
-        updatedAt: m?.ceoApproval?.updatedAt || null,
-      };
+      const ceoApproval = normalizeOfficerApproval(m?.ceoApproval);
+      const hodApproval = normalizeOfficerApproval(m?.hodApproval);
+      const deanApproval = normalizeOfficerApproval(m?.deanApproval);
 
       students.push({
         id: sid,
@@ -398,6 +437,8 @@ export const getComprehensiveResults = async (req, res) => {
         currentMetrics,
         metrics,
         ceoApproval,
+        hodApproval,
+        deanApproval,
       });
     }
 
@@ -420,13 +461,20 @@ export const getComprehensiveResults = async (req, res) => {
 
 
 // GET all metrics
-export const getMetrics = async (_req, res) => {
+export const getMetrics = async (req, res) => {
   try {
-    const response = await AcademicMetrics.find();
-    if (!response || response.length === 0) {
+    const { departmentId } = resolveDepartmentScope(req.user);
+    const response = await AcademicMetrics.find()
+      .populate({ path: 'student', select: 'surname firstname middlename regNo department college' });
+
+    const filtered = departmentId
+      ? response.filter((doc) => doc.student && String(doc.student.department) === departmentId)
+      : response;
+
+    if (!filtered || filtered.length === 0) {
       return res.status(404).json({ message: "Metrics not found" });
     }
-    res.status(200).json({ response });
+    res.status(200).json({ response: filtered });
   } catch (error) {
     res.status(500).json({ message: "Internal server error", error });
   }
@@ -444,6 +492,13 @@ export const deleteMetrics = async (req, res) => {
     const metrics = await AcademicMetrics.findById(metricsId);
     if (!metrics) {
       return res.status(404).json({ error: 'Metrics not found' });
+    }
+
+    if (metrics.student) {
+      const student = await Student.findById(metrics.student).select('department college');
+      if (student) {
+        ensureUserCanAccessDepartment(req.user, student.department, student.college);
+      }
     }
 
     await AcademicMetrics.findByIdAndDelete(metricsId);
@@ -473,46 +528,41 @@ export const deleteMetrics = async (req, res) => {
 export const searchMetrics = async (req, res) => {
   try {
     const { session, semester, level, regNo } = req.query;
-  
+
     const query = {};
+    const { departmentId } = resolveDepartmentScope(req.user);
 
-    // Session is stored as a string like "2023/2024"
     if (session) query.session = String(session).trim();
+    if (semester) query.semester = Number(semester);
+    if (level) query.level = Number(level);
 
-    // Some historical docs might have level/semester saved as strings.
-    // Be liberal in matching: allow number or string.
-    if (semester) {
-      
-      query.semester = Number(semester)
-    }
-
-    if (level) {
-      
-      query.level = Number(level);
-    }
-
-    // If regNo provided, resolve student id and filter by it
     if (regNo) {
       const student = await Student.findOne({
         regNo: String(regNo).trim().toUpperCase(),
-      }).select('_id');
+      }).select('_id department');
       if (!student) return res.json({ students: [] });
+      if (departmentId && String(student.department) !== departmentId) {
+        return res.json({ students: [] });
+      }
       query.student = student._id;
     }
 
-    // Fetch raw stored metrics only
-    console.log(query)
     const docs = await AcademicMetrics.find(query)
-      .populate({ path: 'student', select: 'surname firstname middlename regNo' })
+      .populate({ path: 'student', select: 'surname firstname middlename regNo department' })
       .sort({ createdAt: -1, semester: -1 })
       .lean();
-    
-    //console.log(docs)
 
-    const rows = (docs || []).map((m) => {
+    const scopedDocs = departmentId
+      ? (docs || []).filter((m) => m.student && String(m.student.department) === departmentId)
+      : (docs || []);
+
+    const rows = scopedDocs.map((m) => {
       const fullName = m.student
         ? `${m.student.surname} ${m.student.firstname} ${m.student.middlename || ''}`.trim()
         : '';
+      const ceoApproval = normalizeOfficerApproval(m?.ceoApproval);
+      const hodApproval = normalizeOfficerApproval(m?.hodApproval);
+      const deanApproval = normalizeOfficerApproval(m?.deanApproval);
 
       return {
         id: m.student?._id || m.student,                // for table keys
@@ -541,13 +591,9 @@ export const searchMetrics = async (req, res) => {
           CGPA: Number(m.CGPA || 0),
           _id: m._id, // used by the client for updates
         },
-        ceoApproval: {
-          approved: Boolean(m?.ceoApproval?.approved),
-          flagged: Boolean(m?.ceoApproval?.flagged),
-          name: m?.ceoApproval?.name || '',
-          note: m?.ceoApproval?.note || '',
-          updatedAt: m?.ceoApproval?.updatedAt || null,
-        },
+        ceoApproval,
+        hodApproval,
+        deanApproval,
       };
     });
 
@@ -569,6 +615,18 @@ export const updateMetrics = async (req, res) => {
       return res.status(400).json({ error: 'Invalid metrics ID' });
     }
 
+    const existingDoc = await AcademicMetrics.findById(metricsId).lean();
+    if (!existingDoc) {
+      return res.status(404).json({ error: 'Metrics not found' });
+    }
+
+    if (existingDoc.student) {
+      const student = await Student.findById(existingDoc.student).select('department college');
+      if (student) {
+        ensureUserCanAccessDepartment(req.user, student.department, student.college);
+      }
+    }
+
     // Whitelist only fields we want to allow from the client
     const {
       previousMetrics, // { CCC, CCE, CPE, CGPA }
@@ -579,9 +637,42 @@ export const updateMetrics = async (req, res) => {
       ceoFlagged,
       ceoName,
       ceoNote,
+      ceoTitle,
+      ceoSurname,
+      ceoFirstname,
+      ceoMiddlename,
+      ceoDepartment,
+      ceoCollege,
+      hodApproval,
+      hodApproved,
+      hodFlagged,
+      hodName,
+      hodNote,
+      hodTitle,
+      hodSurname,
+      hodFirstname,
+      hodMiddlename,
+      hodDepartment,
+      hodCollege,
+      deanApproval,
+      deanApproved,
+      deanFlagged,
+      deanName,
+      deanNote,
+      deanTitle,
+      deanSurname,
+      deanFirstname,
+      deanMiddlename,
+      deanDepartment,
+      deanCollege,
     } = req.body || {};
 
     const $set = { lastUpdated: new Date() };
+    const isAdmin = req.user?.roles?.includes('ADMIN');
+    const adminNote =
+      isAdmin && (req.user?.pfNo || req.user?.email)
+        ? `Admin override by ${req.user.pfNo || req.user.email}`
+        : 'Admin override';
 
     if (previousMetrics && typeof previousMetrics === 'object') {
       $set.previousMetrics = {
@@ -609,15 +700,127 @@ export const updateMetrics = async (req, res) => {
     if (ceoFlagged !== undefined) ceoPayload.flagged = ceoFlagged;
     if (ceoName !== undefined) ceoPayload.name = ceoName;
     if (ceoNote !== undefined) ceoPayload.note = ceoNote;
+    if (ceoTitle !== undefined) ceoPayload.title = String(ceoTitle ?? '').trim();
+    if (ceoSurname !== undefined) ceoPayload.surname = String(ceoSurname ?? '').trim();
+    if (ceoFirstname !== undefined) ceoPayload.firstname = String(ceoFirstname ?? '').trim();
+    if (ceoMiddlename !== undefined) ceoPayload.middlename = String(ceoMiddlename ?? '').trim();
+    if (ceoDepartment !== undefined) ceoPayload.department = String(ceoDepartment ?? '').trim();
+    if (ceoCollege !== undefined) ceoPayload.college = String(ceoCollege ?? '').trim();
+    if (isAdmin && ('approved' in ceoPayload || 'flagged' in ceoPayload)) {
+      if (!('note' in ceoPayload) || !ceoPayload.note) {
+        ceoPayload.note = adminNote;
+      }
+    }
 
     const ceoSet = {};
     if ('approved' in ceoPayload) ceoSet['ceoApproval.approved'] = Boolean(ceoPayload.approved);
     if ('flagged' in ceoPayload) ceoSet['ceoApproval.flagged'] = Boolean(ceoPayload.flagged);
     if ('name' in ceoPayload) ceoSet['ceoApproval.name'] = String(ceoPayload.name ?? '').trim();
     if ('note' in ceoPayload) ceoSet['ceoApproval.note'] = String(ceoPayload.note ?? '').trim();
+    if ('title' in ceoPayload) ceoSet['ceoApproval.title'] = String(ceoPayload.title ?? '').trim();
+    if ('surname' in ceoPayload) ceoSet['ceoApproval.surname'] = String(ceoPayload.surname ?? '').trim();
+    if ('firstname' in ceoPayload) ceoSet['ceoApproval.firstname'] = String(ceoPayload.firstname ?? '').trim();
+    if ('middlename' in ceoPayload) ceoSet['ceoApproval.middlename'] = String(ceoPayload.middlename ?? '').trim();
+    if ('department' in ceoPayload) ceoSet['ceoApproval.department'] = String(ceoPayload.department ?? '').trim();
+    if ('college' in ceoPayload) ceoSet['ceoApproval.college'] = String(ceoPayload.college ?? '').trim();
     if (Object.keys(ceoSet).length) {
       ceoSet['ceoApproval.updatedAt'] = new Date();
       Object.assign($set, ceoSet);
+    }
+
+    const hodPayload = {
+      ...((hodApproval && typeof hodApproval === 'object') ? hodApproval : {}),
+    };
+    if (hodApproved !== undefined) hodPayload.approved = hodApproved;
+    if (hodFlagged !== undefined) hodPayload.flagged = hodFlagged;
+    if (hodName !== undefined) hodPayload.name = hodName;
+    if (hodNote !== undefined) hodPayload.note = hodNote;
+    if (hodTitle !== undefined) hodPayload.title = String(hodTitle ?? '').trim();
+    if (hodSurname !== undefined) hodPayload.surname = String(hodSurname ?? '').trim();
+    if (hodFirstname !== undefined) hodPayload.firstname = String(hodFirstname ?? '').trim();
+    if (hodMiddlename !== undefined) hodPayload.middlename = String(hodMiddlename ?? '').trim();
+    if (hodDepartment !== undefined) hodPayload.department = String(hodDepartment ?? '').trim();
+    if (hodCollege !== undefined) hodPayload.college = String(hodCollege ?? '').trim();
+    if (isAdmin && ('approved' in hodPayload || 'flagged' in hodPayload)) {
+      if (!('note' in hodPayload) || !hodPayload.note) {
+        hodPayload.note = adminNote;
+      }
+    }
+
+    const hodSet = {};
+    if ('approved' in hodPayload) hodSet['hodApproval.approved'] = Boolean(hodPayload.approved);
+    if ('flagged' in hodPayload) hodSet['hodApproval.flagged'] = Boolean(hodPayload.flagged);
+    if ('name' in hodPayload) hodSet['hodApproval.name'] = String(hodPayload.name ?? '').trim();
+    if ('note' in hodPayload) hodSet['hodApproval.note'] = String(hodPayload.note ?? '').trim();
+    if ('title' in hodPayload) hodSet['hodApproval.title'] = String(hodPayload.title ?? '').trim();
+    if ('surname' in hodPayload) hodSet['hodApproval.surname'] = String(hodPayload.surname ?? '').trim();
+    if ('firstname' in hodPayload) hodSet['hodApproval.firstname'] = String(hodPayload.firstname ?? '').trim();
+    if ('middlename' in hodPayload) hodSet['hodApproval.middlename'] = String(hodPayload.middlename ?? '').trim();
+    if ('department' in hodPayload) hodSet['hodApproval.department'] = String(hodPayload.department ?? '').trim();
+    if ('college' in hodPayload) hodSet['hodApproval.college'] = String(hodPayload.college ?? '').trim();
+    if (Object.keys(hodSet).length) {
+      hodSet['hodApproval.updatedAt'] = new Date();
+      Object.assign($set, hodSet);
+    }
+
+    const deanPayload = {
+      ...((deanApproval && typeof deanApproval === 'object') ? deanApproval : {}),
+    };
+    if (deanApproved !== undefined) deanPayload.approved = deanApproved;
+    if (deanFlagged !== undefined) deanPayload.flagged = deanFlagged;
+    if (deanName !== undefined) deanPayload.name = deanName;
+    if (deanNote !== undefined) deanPayload.note = deanNote;
+    if (deanTitle !== undefined) deanPayload.title = String(deanTitle ?? '').trim();
+    if (deanSurname !== undefined) deanPayload.surname = String(deanSurname ?? '').trim();
+    if (deanFirstname !== undefined) deanPayload.firstname = String(deanFirstname ?? '').trim();
+    if (deanMiddlename !== undefined) deanPayload.middlename = String(deanMiddlename ?? '').trim();
+    if (deanDepartment !== undefined) deanPayload.department = String(deanDepartment ?? '').trim();
+    if (deanCollege !== undefined) deanPayload.college = String(deanCollege ?? '').trim();
+    if (isAdmin && ('approved' in deanPayload || 'flagged' in deanPayload)) {
+      if (!('note' in deanPayload) || !deanPayload.note) {
+        deanPayload.note = adminNote;
+      }
+    }
+
+    const deanSet = {};
+    if ('approved' in deanPayload) deanSet['deanApproval.approved'] = Boolean(deanPayload.approved);
+    if ('flagged' in deanPayload) deanSet['deanApproval.flagged'] = Boolean(deanPayload.flagged);
+    if ('name' in deanPayload) deanSet['deanApproval.name'] = String(deanPayload.name ?? '').trim();
+    if ('note' in deanPayload) deanSet['deanApproval.note'] = String(deanPayload.note ?? '').trim();
+    if ('title' in deanPayload) deanSet['deanApproval.title'] = String(deanPayload.title ?? '').trim();
+    if ('surname' in deanPayload) deanSet['deanApproval.surname'] = String(deanPayload.surname ?? '').trim();
+    if ('firstname' in deanPayload) deanSet['deanApproval.firstname'] = String(deanPayload.firstname ?? '').trim();
+    if ('middlename' in deanPayload) deanSet['deanApproval.middlename'] = String(deanPayload.middlename ?? '').trim();
+    if ('department' in deanPayload) deanSet['deanApproval.department'] = String(deanPayload.department ?? '').trim();
+    if ('college' in deanPayload) deanSet['deanApproval.college'] = String(deanPayload.college ?? '').trim();
+    if (Object.keys(deanSet).length) {
+      deanSet['deanApproval.updatedAt'] = new Date();
+      Object.assign($set, deanSet);
+    }
+
+    const currentCeoApproved = Boolean(existingDoc?.ceoApproval?.approved);
+    const currentHodApproved = Boolean(existingDoc?.hodApproval?.approved);
+    const currentDeanApproved = Boolean(existingDoc?.deanApproval?.approved);
+
+    let targetCeoApproved = currentCeoApproved;
+    if ('approved' in ceoPayload) targetCeoApproved = Boolean(ceoPayload.approved);
+
+    let targetHodApproved = currentHodApproved;
+    if ('approved' in hodPayload) targetHodApproved = Boolean(hodPayload.approved);
+
+    let targetDeanApproved = currentDeanApproved;
+    if ('approved' in deanPayload) targetDeanApproved = Boolean(deanPayload.approved);
+
+    if (targetHodApproved && !targetCeoApproved) {
+      return res.status(400).json({
+        error: 'Head of Department cannot approve before the College Exam Officer has approved.',
+      });
+    }
+
+    if (targetDeanApproved && (!targetCeoApproved || !targetHodApproved)) {
+      return res.status(400).json({
+        error: 'Dean cannot approve before both the College Exam Officer and Head of Department have approved.',
+      });
     }
 
     const updated = await AcademicMetrics.findByIdAndUpdate(
@@ -625,7 +828,6 @@ export const updateMetrics = async (req, res) => {
       { $set },
       { new: true, runValidators: true }
     ).populate({ path: 'student', select: 'surname firstname middlename regNo' });
-
     if (!updated) {
       return res.status(404).json({ error: 'Metrics not found' });
     }
@@ -658,13 +860,9 @@ export const updateMetrics = async (req, res) => {
           CGPA: Number(updated.CGPA || 0),
           _id: updated._id,
         },
-        ceoApproval: {
-          approved: Boolean(updated?.ceoApproval?.approved),
-          flagged: Boolean(updated?.ceoApproval?.flagged),
-          name: updated?.ceoApproval?.name || '',
-          note: updated?.ceoApproval?.note || '',
-          updatedAt: updated?.ceoApproval?.updatedAt || null,
-        },
+        ceoApproval: normalizeOfficerApproval(updated?.ceoApproval),
+        hodApproval: normalizeOfficerApproval(updated?.hodApproval),
+        deanApproval: normalizeOfficerApproval(updated?.deanApproval),
       },
     });
   } catch (error) {
@@ -702,9 +900,19 @@ export const recomputeTermMetrics = async (req, res) => {
     const lvlStr = String(level);  // for Result/CourseRegistration
     const lvlNum = Number(level);  // for AcademicMetrics
 
-    const resultStudents = await Result.distinct('student', { session, semester: sem, level: lvlStr });
+    const { departmentId, departmentObjectId } = resolveDepartmentScope(req.user);
+
+    const resultFilter = { session, semester: sem, level: lvlStr };
+
+    const resultStudents = await Result.distinct('student', resultFilter);
+
+    const registrationMatch = { session, semester: sem, level: lvlStr };
+    if (departmentObjectId) {
+      registrationMatch.department = departmentObjectId;
+    }
+
     const regAgg = await CourseRegistration.aggregate([
-      { $match: { session, semester: sem, level: lvlStr } },
+      { $match: registrationMatch },
       { $unwind: '$student' },
       { $group: { _id: null, students: { $addToSet: '$student' } } },
       { $project: { _id: 0, students: 1 } },
@@ -721,9 +929,14 @@ export const recomputeTermMetrics = async (req, res) => {
       });
 
       if (requestedRegNos.size) {
-        const docs = await Student.find({ _id: { $in: combinedStudents } })
-          .select('_id regNo')
-          .lean();
+      const studentFilter = { _id: { $in: combinedStudents } };
+      if (departmentId) {
+        studentFilter.department = departmentId;
+      }
+
+      const docs = await Student.find(studentFilter)
+        .select('_id regNo')
+        .lean();
         docs.forEach((doc) => {
           const regUpper = normalizeRegNo(doc.regNo);
           if (requestedRegNos.has(regUpper)) {
@@ -738,8 +951,30 @@ export const recomputeTermMetrics = async (req, res) => {
       }
     }
 
+    if (departmentId && targetStudentIds.length) {
+      const allowedStudents = await Student.find({
+        _id: { $in: targetStudentIds },
+        department: departmentId,
+      }).select('_id').lean();
+      const allowedSet = new Set(allowedStudents.map((doc) => String(doc._id)));
+      targetStudentIds = targetStudentIds.filter((sid) => allowedSet.has(String(sid)));
+    }
+
+    if (!targetStudentIds.length) {
+      return res.json({ ok: true, message: 'No matching students for the provided selection.', count: 0 });
+    }
+
+    const studentDocsForMetrics = await Student.find({ _id: { $in: targetStudentIds } })
+      .populate('department', 'name')
+      .populate('college', 'name')
+      .select('_id department college')
+      .lean();
+    const studentInfoById = new Map(
+      studentDocsForMetrics.map((doc) => [String(doc._id), doc])
+    );
+
     const regs = await CourseRegistration.aggregate([
-      { $match: { session, semester: sem, level: lvlStr } },
+      { $match: registrationMatch },
       { $unwind: '$student' },
       { $group: { _id: '$student', courses: { $addToSet: '$course' } } },
     ]);
@@ -784,11 +1019,23 @@ export const recomputeTermMetrics = async (req, res) => {
       const attempted = await attemptedFor(sid);
       const previousMetrics = await findPreviousMetrics(sid, session, sem);
 
+      const studentInfo = studentInfoById.get(String(sid));
+      const departmentName = studentInfo?.department?.name || '';
+      const collegeName = studentInfo?.college?.name || '';
+      const normalizedDepartmentName = departmentName || DEFAULT_DEPARTMENT_NAME;
+      const normalizedCollegeName = collegeName || DEFAULT_COLLEGE_NAME;
+
       if (attempted.length) {
         const current = calculateAcademicMetrics(attempted, previousMetrics);
         await AcademicMetrics.findOneAndUpdate(
           { student: sid, session, semester: sem, level: lvlNum },
-          { ...current, previousMetrics, lastUpdated: new Date() },
+          {
+            ...current,
+            previousMetrics,
+            lastUpdated: new Date(),
+            department: normalizedDepartmentName,
+            college: normalizedCollegeName,
+          },
           { upsert: true, new: true }
         );
       } else {
@@ -820,11 +1067,28 @@ export const computeStudentTermMetrics = async (req, res) => {
     const lvlNum = Number(level);
     const regUpper = String(regNo).trim().toUpperCase();
 
-    const student = await Student.findOne({ regNo: regUpper }).lean();
+    const student = await Student.findOne({ regNo: regUpper })
+      .populate('department', 'name')
+      .populate('college', 'name')
+      .lean();
     if (!student) return res.status(404).json({ error: 'Student not found' });
 
+    const { departmentId, departmentObjectId } = resolveDepartmentScope(req.user);
+    const studentDepartmentId =
+      student.department && typeof student.department === 'object'
+        ? String(student.department._id || '')
+        : String(student.department || '');
+    if (departmentId && studentDepartmentId !== departmentId) {
+      return res.status(403).json({ error: 'You are not authorized to compute metrics for this student.' });
+    }
+
+    const registrationMatchSingle = { session, semester: sem, level: lvlStr };
+    if (departmentObjectId) {
+      registrationMatchSingle.department = departmentObjectId;
+    }
+
     const regsAgg = await CourseRegistration.aggregate([
-      { $match: { session, semester: sem, level: lvlStr } },
+      { $match: registrationMatchSingle },
       { $unwind: '$student' },
       { $match: { student: student._id } },
       { $group: { _id: '$student', courses: { $addToSet: '$course' } } },
@@ -857,6 +1121,16 @@ export const computeStudentTermMetrics = async (req, res) => {
 
     const previousMetrics = await findPreviousMetrics(student._id, session, sem);
     const current = calculateAcademicMetrics(attempted, previousMetrics);
+    const departmentName =
+      student.department && typeof student.department === 'object'
+        ? student.department.name || ''
+        : '';
+    const collegeName =
+      student.college && typeof student.college === 'object'
+        ? student.college.name || ''
+        : '';
+    const normalizedDepartmentName = departmentName || DEFAULT_DEPARTMENT_NAME;
+    const normalizedCollegeName = collegeName || DEFAULT_COLLEGE_NAME;
 
     // BEFORE (overwrites edited fields every time)
 // const updated = await AcademicMetrics.findOneAndUpdate(
@@ -867,11 +1141,14 @@ export const computeStudentTermMetrics = async (req, res) => {
 
 // AFTER (only set metrics on first insert; preserve edits on subsequent runs)
 const updated = await AcademicMetrics.findOneAndUpdate(
-  { student: stu.id, session, semester: semNum, level: lvlNum },
+  { student: student._id, session, semester: sem, level: lvlNum },
   {
-    // always keep these fresh
-    $set: { previousMetrics, lastUpdated: new Date() },
-    // only write computed metrics when creating the doc for the first time
+    $set: {
+      previousMetrics,
+      lastUpdated: new Date(),
+      department: normalizedDepartmentName,
+      college: normalizedCollegeName,
+    },
     $setOnInsert: {
       TCC: current.TCC,
       TCE: current.TCE,
@@ -881,11 +1158,10 @@ const updated = await AcademicMetrics.findOneAndUpdate(
       CCE: current.CCE,
       CPE: current.CPE,
       CGPA: current.CGPA,
-      // also persist session/semester/level/student on insert for completeness
       session,
-      semester: semNum,
+      semester: sem,
       level: lvlNum,
-      student: stu.id,
+      student: student._id,
     },
   },
   { new: true, upsert: true }
@@ -899,6 +1175,8 @@ const updated = await AcademicMetrics.findOneAndUpdate(
       previousMetrics,
       currentMetrics: { TCC: current.TCC, TCE: current.TCE, TPE: current.TPE, GPA: current.GPA },
       metrics: { CCC: updated.CCC, CCE: updated.CCE, CPE: updated.CPE, CGPA: updated.CGPA, _id: updated._id },
+      department: normalizedDepartmentName,
+      college: normalizedCollegeName,
     });
   } catch (err) {
     console.error('computeStudentTermMetrics error:', err);

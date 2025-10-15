@@ -1,10 +1,10 @@
 // controllers/graduationController.js  (UPDATED)
 import mongoose from 'mongoose';
 import AcademicMetrics from '../models/academicMetrics.js';
-import PassFail from '../models/passFailList.js';
 import Student from '../models/student.js';
-import Result from '../models/result.js';     // ← add
-import Course from '../models/course.js'; 
+import Result from '../models/result.js';
+import CourseRegistration from '../models/courseRegistration.js';
+import ApprovedCourses from '../models/approvedCourses.js';
 
 export const isGraduationHookAvailable = async (req, res) => {
   try {
@@ -58,6 +58,66 @@ export const getGraduatingList = async (req, res) => {
 
     const studentIds = metrics.filter(m => m.student).map(m => m.student._id);
 
+    const approvedDocs = await ApprovedCourses.find({
+      session,
+      level: 400,
+      semester: { $in: [1, 2] },
+    })
+      .populate('courses', 'code title unit option')
+      .lean();
+
+    const approvedCourseMeta = new Map(); // courseId -> details
+    const approvedCourseIds = new Set();
+
+    approvedDocs.forEach((doc) => {
+      const sem = Number(doc.semester);
+      (doc.courses || []).forEach((course) => {
+        const cid = String(course?._id || course);
+        if (!cid) return;
+        approvedCourseIds.add(cid);
+        if (!approvedCourseMeta.has(cid)) {
+          approvedCourseMeta.set(cid, {
+            code: course.code || '',
+            title: course.title || '',
+            option: course.option || '',
+            unit: Number(course.unit) || 0,
+            semester: sem,
+          });
+        }
+      });
+    });
+
+    const approvedCourseList = Array.from(approvedCourseIds);
+
+    const registrationAgg = approvedCourseIds.size
+      ? await CourseRegistration.aggregate([
+          {
+            $match: {
+              session,
+              level: '400',
+              semester: { $in: [1, 2] },
+            },
+          },
+          { $unwind: '$student' },
+          { $match: { student: { $in: studentIds } } },
+          {
+            $group: {
+              _id: '$student',
+              courses: { $addToSet: '$course' },
+            },
+          },
+        ])
+      : [];
+
+    const registrationsByStudent = new Map(); // sid -> Set(courseId)
+    registrationAgg.forEach((row) => {
+      const sid = String(row._id);
+      const courses = new Set(
+        (row.courses || []).map((courseId) => String(courseId))
+      );
+      registrationsByStudent.set(sid, courses);
+    });
+
     // === Compute unresolved failed courses from Result directly ===
     // Pull all results for these students for all sessions/semesters (latest first)
     const allRes = await Result.find({ student: { $in: studentIds } })
@@ -77,17 +137,30 @@ export const getGraduatingList = async (req, res) => {
       }
     }
 
+    const resultsByStudent = new Map(); // sid -> Map(courseId -> result)
+    for (const [key, row] of latestAttempt.entries()) {
+      const [sid, cid] = key.split('|');
+      if (!resultsByStudent.has(sid)) {
+        resultsByStudent.set(sid, new Map());
+      }
+      if (!resultsByStudent.get(sid).has(cid)) {
+        resultsByStudent.get(sid).set(cid, row);
+      }
+    }
+
     // Student → list of unresolved failed course details
     const failedByStudent = new Map(); // sid -> [{code, unit, score, grade, session, semester}]
     for (const [key, row] of latestAttempt.entries()) {
       if ((row.grade || '').toUpperCase() === 'F') {
         const sid = String(row.student);
+        const cid = key.split('|')[1];
         if (!failedByStudent.has(sid)) failedByStudent.set(sid, []);
         failedByStudent.get(sid).push({
           code: row.course?.code || '',
           unit: row.course?.unit,
           score: row.grandtotal,
           grade: row.grade,
+          courseId: cid,
           session: row.session,
           semester: row.semester
         });
@@ -117,14 +190,51 @@ export const getGraduatingList = async (req, res) => {
         const sid = String(s._id);
 
         const isStudentAt400 = String(s.level) === '400';
-        const fails = failedByStudent.get(sid) || [];
+        const failDetails = (failedByStudent.get(sid) || []).map((fail) => ({
+          ...fail,
+          isApprovedCourse: approvedCourseIds.has(fail.courseId || ''),
+        }));
+        failDetails.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+
+        const registeredCourses = registrationsByStudent.get(sid) || new Set();
+        const studentResults = resultsByStudent.get(sid) || new Map();
+
+        const missingRegistrationIds = approvedCourseList.filter(
+          (cid) => !registeredCourses.has(cid)
+        );
+        const missingResultIds = approvedCourseList.filter(
+          (cid) => !studentResults.has(cid)
+        );
+
+        const missingRegistrationCodes = missingRegistrationIds
+          .map((cid) => approvedCourseMeta.get(cid)?.code || '')
+          .filter(Boolean);
+        const missingResultCodes = missingResultIds
+          .map((cid) => approvedCourseMeta.get(cid)?.code || '')
+          .filter(Boolean);
+
+        const registeredAllApproved = missingRegistrationIds.length === 0;
+        const attemptedAllApproved = missingResultIds.length === 0;
+
+        const approvedFails = failDetails.filter(
+          (fail) => approvedCourseIds.has(fail.courseId || '')
+        );
+        const passedAllApproved = approvedFails.length === 0;
+
+        const fails = failDetails;
         const noOutstandingFail = fails.length === 0;
 
         const isDE = s.regNoSuffix === 'DE';
         const minCCE = isDE ? 86 : 135;
         const meetsCCE = (m.CCE || 0) >= minCCE;
 
-        const eligible = isStudentAt400 && noOutstandingFail && meetsCCE;
+        const eligible =
+          isStudentAt400 &&
+          registeredAllApproved &&
+          attemptedAllApproved &&
+          passedAllApproved &&
+          noOutstandingFail &&
+          meetsCCE;
 
         const cgpa100 = latestCgpaByStudentLevel.get(`${sid}-100`) || 0;
         const cgpa200 = latestCgpaByStudentLevel.get(`${sid}-200`) || 0;
@@ -132,12 +242,35 @@ export const getGraduatingList = async (req, res) => {
 
         const reasons = [];
         if (!isStudentAt400) reasons.push('Not at 400 level');
-        if (!noOutstandingFail) reasons.push('Outstanding failed course(s)');
+        if (!registeredAllApproved && missingRegistrationCodes.length) {
+          reasons.push(
+            `Missing registration for approved course(s): ${missingRegistrationCodes.join(', ')}`
+          );
+        }
+        if (!attemptedAllApproved && missingResultCodes.length) {
+          reasons.push(
+            `No final result recorded for approved course(s): ${missingResultCodes.join(', ')}`
+          );
+        }
+        if (!passedAllApproved && approvedFails.length) {
+          const codes = approvedFails
+            .map((fail) => fail.code || '')
+            .filter(Boolean);
+          reasons.push(
+            `Failed approved course(s): ${codes.join(', ')}`
+          );
+        }
+        if (!noOutstandingFail && fails.length) {
+          const codes = fails
+            .map((fail) => fail.code || '')
+            .filter(Boolean);
+          reasons.push(
+            `Outstanding failed course(s): ${codes.join(', ')}`
+          );
+        }
         if (!meetsCCE) reasons.push(`CCE below minimum (${m.CCE || 0} < ${minCCE} for ${isDE ? 'DE' : 'UE'})`);
 
         // sort failed course details by code for stable display
-        fails.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
-
         return {
           id: sid,
           regNo: s.regNo,
@@ -148,10 +281,27 @@ export const getGraduatingList = async (req, res) => {
           cgpaByLevel: { L100: cgpa100, L200: cgpa200, L300: cgpa300 },
           cumulative: { CCC: m.CCC, CCE: m.CCE, CPE: m.CPE, CGPA: m.CGPA },
           current:     { TCC: m.TCC, TCE: m.TCE, TPE: m.TPE, GPA: m.GPA },
-          failedCourseDetails: fails, // <<<<<< USED BY PDF
+          failedCourseDetails: fails,
+          compliance: {
+            registeredAllApproved,
+            attemptedAllApproved,
+            passedAllApproved,
+            missingRegistrations: missingRegistrationCodes,
+            missingResults: missingResultCodes,
+            outstandingApprovedFails: approvedFails.map((fail) => fail.code || ''),
+            totalApprovedCourses: approvedCourseList.length,
+          },
           eligibility: {
             eligible,
-            rules: { is400Level: isStudentAt400, noOutstandingFail, meetsCCE, minCCERequired: minCCE },
+            rules: {
+              is400Level: isStudentAt400,
+              registeredAllApproved,
+              attemptedAllApproved,
+              passedAllApproved,
+              noOutstandingFail,
+              meetsCCE,
+              minCCERequired: minCCE,
+            },
             reasons
           },
         };
@@ -174,7 +324,15 @@ export const getGraduatingList = async (req, res) => {
         department: 'Biochemistry',
         programme: 'B.Sc. Biochemistry',
         title: 'GRADUATING STUDENTS LIST'
-      }
+      },
+      requirements: {
+        minimumCCE: { UE: 135, DE: 86 },
+        approvedCourseCount: approvedCourseList.length,
+        approvedCourses: approvedCourseList.map((cid) => ({
+          id: cid,
+          ...(approvedCourseMeta.get(cid) || {}),
+        })),
+      },
     });
   } catch (err) {
     console.error('Error in getGraduatingList:', err);

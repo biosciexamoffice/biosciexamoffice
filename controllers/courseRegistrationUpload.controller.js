@@ -7,6 +7,36 @@ import { Readable } from 'stream';
 import Student from '../models/student.js';
 import Course from '../models/course.js';
 import CourseRegistration from '../models/courseRegistration.js';
+import { DEFAULT_PROGRAMME } from '../constants/institutionDefaults.js';
+import { validateInstitutionHierarchy } from '../services/institutionService.js';
+import {
+  buildDepartmentScopeFilter,
+  ensureResourceMatchesUserScope,
+  ensureUserCanAccessDepartment,
+} from '../services/accessControl.js';
+
+const buildRegistrationPayload = ({ courseDoc, session, semesterNum, levelStr, studentIds, fallbackInstitution }) => {
+  const collegeId = courseDoc.college || fallbackInstitution?.college?._id;
+  const departmentId = courseDoc.department || fallbackInstitution?.department?._id;
+  const programmeId = courseDoc.programme || fallbackInstitution?.programme?._id;
+  const programmeType = courseDoc.programmeType || fallbackInstitution?.programme?.degreeType || DEFAULT_PROGRAMME.degreeType;
+
+  if (!collegeId || !departmentId || !programmeId) {
+    throw new Error('COURSE_MISSING_INSTITUTION');
+  }
+
+  return {
+    course: courseDoc._id,
+    session,
+    semester: semesterNum,
+    level: levelStr,
+    student: studentIds,
+    college: collegeId,
+    department: departmentId,
+    programme: programmeId,
+    programmeType,
+  };
+};
 
 /** Stream-parse a CSV buffer and return unique regNos (uppercased). */
 function readRegNosFromCsv(buffer) {
@@ -126,12 +156,12 @@ const keyOf = (courseId, session, semesterNum, levelStr) =>
 
 export async function uploadCourseRegistrations(req, res) {
   try {
-    const { session, semester, curriculumType: rawCurriculumType } = req.body;
+    const { session, semester, curriculumType: rawCurriculumType, collegeId, departmentId, programmeId } = req.body;
 
-    if (!session || !semester) {
+    if (!session || !semester || !collegeId || !departmentId || !programmeId) {
       return res.status(400).json({
         ok: false,
-        message: 'Fields "session" and "semester" are required.',
+        message: 'Fields "session", "semester", "collegeId", "departmentId", and "programmeId" are required.',
       });
     }
     if (!req.files?.length) {
@@ -162,6 +192,22 @@ export async function uploadCourseRegistrations(req, res) {
         message: '"curriculumType" must be either BMASS or CCMASS.'
       });
     }
+
+    let fallbackInstitution;
+    try {
+      fallbackInstitution = await validateInstitutionHierarchy({
+        collegeId,
+        departmentId,
+        programmeId,
+      });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({
+        ok: false,
+        message: err.message || 'Unable to resolve institution details for registrations upload.',
+      });
+    }
+
+    ensureUserCanAccessDepartment(req.user, fallbackInstitution.department._id, fallbackInstitution.college._id);
 
     const results = {
       ok: true,
@@ -238,8 +284,10 @@ export async function uploadCourseRegistrations(req, res) {
 
           const prefixedCodes = [...new Set([...prefixedLookup.values()].map((c) => c.toUpperCase()))];
           const courseDocs = prefixedCodes.length
-            ? await Course.find({ code: { $in: prefixedCodes } }).select('_id code title level semester unit')
+            ? await Course.find({ code: { $in: prefixedCodes } })
+                .select('_id code title level semester unit college department programme programmeType')
             : [];
+          courseDocs.forEach((doc) => ensureUserCanAccessDepartment(req.user, doc.department, doc.college));
           const courseByCode = new Map(courseDocs.map((c) => [c.code.toUpperCase(), c]));
 
           const missingCourseSummaries = [];
@@ -344,16 +392,23 @@ export async function uploadCourseRegistrations(req, res) {
 
             let docId = null;
             if (freshIds.length) {
-              const newDoc = await CourseRegistration.create({
-                course: courseDoc._id,
-                session,
-                semester: semesterNum,
-                level: levelStr,
-                student: freshIds
-              });
-              docId = newDoc._id;
-              totalCreated += freshIds.length;
-              levelSummary.successfulRegistrations += freshIds.length;
+              if (!courseDoc.college || !courseDoc.department || !courseDoc.programme) {
+                report.errors.push('COURSE_MISSING_INSTITUTION');
+              } else {
+                const newDoc = await CourseRegistration.create(
+                buildRegistrationPayload({
+                  courseDoc,
+                  session,
+                  semesterNum,
+                  levelStr,
+                  studentIds: freshIds,
+                  fallbackInstitution,
+                })
+              );
+                docId = newDoc._id;
+                totalCreated += freshIds.length;
+                levelSummary.successfulRegistrations += freshIds.length;
+              }
             }
 
             totalDuplicates += duplicateRegNos.length;
@@ -384,6 +439,7 @@ export async function uploadCourseRegistrations(req, res) {
 
           report.savedCount = totalAttempted;
           report.createdCount = totalCreated;
+          report.duplicateCount = totalDuplicates;
           const levelSummaries = [...levelSummaryMap.values()].sort((a, b) =>
             a.level.localeCompare(b.level)
           );
@@ -395,6 +451,10 @@ export async function uploadCourseRegistrations(req, res) {
             semester: semesterNum,
             totalCards: entries.length,
             uniqueStudents: uniqueRegNos.length,
+            collegeName: fallbackInstitution.college.name,
+            departmentName: fallbackInstitution.department.name,
+            programmeName: fallbackInstitution.programme.name,
+            programmeType: fallbackInstitution.programme.degreeType,
             levels: levelSummaries.map((summary) => summary.level),
             levelSummaries,
             totalCoursesMatched: courseStats.length,
@@ -435,12 +495,18 @@ export async function uploadCourseRegistrations(req, res) {
             report.errors.push('MISSING_STUDENT_LEVEL');
           }
 
+          if (report.errors.includes('COURSE_MISSING_INSTITUTION')) {
+            report.status = 'failed';
+          }
+
           if (courseStats.length === 0) {
             report.errors.push('NO_REGISTRATIONS_CREATED');
             report.status = 'failed';
           } else {
-            report.status = 'succeeded';
-            results.summary.succeeded += 1;
+            if (report.status !== 'failed') {
+              report.status = 'succeeded';
+              results.summary.succeeded += 1;
+            }
           }
 
           continue;
@@ -454,12 +520,15 @@ export async function uploadCourseRegistrations(req, res) {
           continue;
         }
 
-        const course = await Course.findOne({ code: courseCode }).select('_id code title');
+        const course = await Course.findOne({ code: courseCode })
+          .select('_id code title level semester unit college department programme programmeType');
         if (!course) {
           report.errors.push('COURSE_NOT_FOUND');
           report.details.courseCode = courseCode;
           continue;
         }
+
+        ensureUserCanAccessDepartment(req.user, course.department, course.college);
 
         let regNos;
         try {
@@ -548,17 +617,24 @@ export async function uploadCourseRegistrations(req, res) {
 
           let docId = null;
           if (freshIds.length) {
-            const doc = await CourseRegistration.create({
-              course: course._id,
-              session,
-              semester: semesterNum,
-              level: levelStr,
-              student: freshIds
-            });
-            docId = doc._id;
-            freshIds.forEach((id) => seen.add(String(id)));
-            totalCreatedForCsv += freshIds.length;
-            insertedRegNos.push(...freshRegNos);
+            if (!course.college || !course.department || !course.programme) {
+              report.errors.push('COURSE_MISSING_INSTITUTION');
+            } else {
+              const doc = await CourseRegistration.create(
+                buildRegistrationPayload({
+                  courseDoc: course,
+                  session,
+                  semesterNum,
+                  levelStr,
+                  studentIds: freshIds,
+                  fallbackInstitution,
+                })
+              );
+              docId = doc._id;
+              freshIds.forEach((id) => seen.add(String(id)));
+              totalCreatedForCsv += freshIds.length;
+              insertedRegNos.push(...freshRegNos);
+            }
           }
 
           duplicateRegNos.push(...levelDuplicates);
@@ -575,14 +651,19 @@ export async function uploadCourseRegistrations(req, res) {
 
         perLevelResults.sort((a, b) => a.level.localeCompare(b.level));
 
-        report.status = 'succeeded';
+        report.status = report.errors.includes('COURSE_MISSING_INSTITUTION') ? 'failed' : 'succeeded';
         report.createdCount = totalCreatedForCsv;
+        report.duplicateCount = duplicateRegNos.length;
         report.details.course = {
           code: course.code,
           title: course.title,
           session,
           semester: semesterNum
         };
+        report.details.collegeName = fallbackInstitution.college.name;
+        report.details.departmentName = fallbackInstitution.department.name;
+        report.details.programmeName = fallbackInstitution.programme.name;
+        report.details.programmeType = fallbackInstitution.programme.degreeType;
         report.details.levels = perLevelResults.map((r) => r.level);
         report.details.perLevel = perLevelResults;
         report.details.insertedRegNos = insertedRegNos;
@@ -598,7 +679,9 @@ export async function uploadCourseRegistrations(req, res) {
           report.errors.push('MISSING_STUDENT_LEVEL');
         }
 
-        results.summary.succeeded += 1;
+        if (report.status === 'succeeded') {
+          results.summary.succeeded += 1;
+        }
       } catch (e) {
         report.errors.push('SAVE_ERROR');
         report.details.mongooseError = e.message;
@@ -621,7 +704,6 @@ export async function uploadCourseRegistrations(req, res) {
 export async function searchCourseRegistrations(req, res) {
   try {
     const { session, semester, level, course } = req.query;
-    console.log(session, semester, level, course)
     let { page = '1', limit = '1000' } = req.query;
 
     // ---- validations
@@ -637,7 +719,7 @@ export async function searchCourseRegistrations(req, res) {
       return res.status(400).json({ ok: false, message: '"semester" must be 1 or 2.' });
     }
 
-    const allowedLevels = new Set(['100', '200', '300', '400']);
+    const allowedLevels = new Set(['100', '200', '300', '400', '500']);
     const levelStr = String(level);
     if (!allowedLevels.has(levelStr)) {
       return res.status(400).json({ ok: false, message: '"level" must be one of 100, 200, 300, 400.' });
@@ -651,17 +733,30 @@ export async function searchCourseRegistrations(req, res) {
     // ---- resolve course id (accepts code or ObjectId)
     let courseDoc = null;
     if (mongoose.isValidObjectId(course)) {
-      courseDoc = await Course.findById(course).select('_id code title');
+      courseDoc = await Course.findById(course).select('_id code title department college');
     } else {
-      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id code title');
+      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id code title department college');
     }
     if (!courseDoc) {
       return res.status(404).json({ ok: false, message: 'Course not found for provided "course" value.' });
     }
 
+    ensureResourceMatchesUserScope(req.user, courseDoc);
+
     // ---- aggregation: dedupe across ALL docs for (course, session, semester, level)
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const matchStage = {
+      course: courseDoc._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      matchStage.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    }
+
     const pipeline = [
-      { $match: { course: courseDoc._id, session, semester: semesterNum, level: levelStr } },
+      { $match: matchStage },
       { $project: { student: 1 } },
       { $unwind: { path: '$student', preserveNullAndEmptyArrays: false } },
       // unique student ids
@@ -734,7 +829,7 @@ export async function listRegistrationCourses(req, res) {
     if (![1, 2].includes(semesterNum)) {
       return res.status(400).json({ ok: false, message: '"semester" must be 1 or 2.' });
     }
-    const allowedLevels = new Set(['100','200','300','400']);
+    const allowedLevels = new Set(['100','200','300','400','500']);
     const levelStr = String(level);
     if (!allowedLevels.has(levelStr)) {
       return res.status(400).json({ ok: false, message: '"level" must be one of 100, 200, 300, 400.' });
@@ -748,8 +843,18 @@ export async function listRegistrationCourses(req, res) {
 
     // Pipeline: term filter → explode students → dedupe per course+student → group per course (unique count)
     // → join course → optional q filter → sort → paginate
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const matchStage = {
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      matchStage.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    }
+
     const pipeline = [
-      { $match: { session, semester: semesterNum, level: levelStr } },
+      { $match: matchStage },
       { $project: { course: 1, student: 1 } },
       { $unwind: '$student' },
       { $group: { _id: { course: '$course', student: '$student' } } }, // unique student per course
@@ -784,7 +889,8 @@ export async function listRegistrationCourses(req, res) {
                 title: '$$d.course.title',
                 unit: '$$d.course.unit',
                 semester: '$$d.course.semester',
-                level: '$$d.course.level'
+                level: '$$d.course.level',
+                programmeType: '$$d.course.programmeType'
               }
             }
           },
@@ -836,7 +942,7 @@ export async function getRegistrationStudents(req, res) {
     if (![1, 2].includes(semesterNum)) {
       return res.status(400).json({ ok: false, message: '"semester" must be 1 or 2.' });
     }
-    const allowedLevels = new Set(['100','200','300','400']);
+    const allowedLevels = new Set(['100','200','300','400','500']);
     const levelStr = String(level);
     if (!allowedLevels.has(levelStr)) {
       return res.status(400).json({ ok: false, message: '"level" must be one of 100, 200, 300, 400.' });
@@ -845,11 +951,13 @@ export async function getRegistrationStudents(req, res) {
     // resolve course id
     let courseDoc = null;
     if (mongoose.isValidObjectId(course)) {
-      courseDoc = await Course.findById(course).select('_id code title');
+      courseDoc = await Course.findById(course).select('_id code title department college');
     } else {
-      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id code title');
+      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id code title department college');
     }
     if (!courseDoc) return res.status(404).json({ ok: false, message: 'Course not found' });
+
+    ensureResourceMatchesUserScope(req.user, courseDoc);
 
     page  = Math.max(1, parseInt(page, 10) || 1);
     limit = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
@@ -857,8 +965,21 @@ export async function getRegistrationStudents(req, res) {
 
     const regRx = regNo ? new RegExp(regNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
 
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const matchStage = {
+      course: courseDoc._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      matchStage.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    } else if (courseDoc.department) {
+      matchStage.department = courseDoc.department;
+    }
+
     const pipeline = [
-      { $match: { course: courseDoc._id, session, semester: semesterNum, level: levelStr } },
+      { $match: matchStage },
       { $project: { student: 1 } },
       { $unwind: '$student' },
       { $group: { _id: '$student' } }, // unique
@@ -941,19 +1062,29 @@ export async function deleteRegisteredStudent(req, res) {
     // resolve course id
     let courseDoc = null;
     if (mongoose.isValidObjectId(course)) {
-      courseDoc = await Course.findById(course).select('_id');
+      courseDoc = await Course.findById(course).select('_id department college');
     } else {
-      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id');
+      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id department college');
     }
     if (!courseDoc) return res.status(404).json({ ok: false, message: 'Course not found' });
+
+    ensureResourceMatchesUserScope(req.user, courseDoc);
 
     const student = await Student.findOne({ regNo: String(regNo).toUpperCase() }).select('_id regNo');
     if (!student) return res.status(404).json({ ok: false, message: 'Student not found' });
 
-    const result = await CourseRegistration.updateMany(
-      { course: courseDoc._id, session, semester: semesterNum, level: levelStr },
-      { $pull: { student: student._id } }
-    );
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const match = {
+      course: courseDoc._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      match.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    }
+
+    const result = await CourseRegistration.updateMany(match, { $pull: { student: student._id } });
 
     return res.json({
       ok: true,
@@ -989,8 +1120,8 @@ export async function moveRegisteredStudents(req, res) {
 
     // Resolve courses (accept ObjectId or code)
     async function resolveCourse(v) {
-      if (mongoose.isValidObjectId(v)) return Course.findById(v).select('_id code title').lean();
-      return Course.findOne({ code: String(v).trim() }).select('_id code title').lean();
+      if (mongoose.isValidObjectId(v)) return Course.findById(v).select('_id code title department college programme programmeType').lean();
+      return Course.findOne({ code: String(v).trim() }).select('_id code title department college programme programmeType').lean();
     }
     const from = await resolveCourse(fromCourse);
     const to   = await resolveCourse(toCourse);
@@ -1000,6 +1131,9 @@ export async function moveRegisteredStudents(req, res) {
     if (String(from._id) === String(to._id)) {
       return res.status(400).json({ ok: false, message: 'fromCourse and toCourse must be different.' });
     }
+
+    ensureResourceMatchesUserScope(req.user, from);
+    ensureResourceMatchesUserScope(req.user, to);
 
     // Normalize regNos
     const regArr = Array.isArray(regNos) ? regNos : [regNos];
@@ -1018,21 +1152,58 @@ export async function moveRegisteredStudents(req, res) {
     const studentIds = students.map(s => s._id);
 
     // 1) Ensure target doc (upsert)
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const toMatch = {
+      course: to._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      toMatch.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    } else if (to.department) {
+      toMatch.department = to.department;
+    }
+
+    const insertPayload = {
+      course: to._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+      student: [],
+    };
+    if (to.college) insertPayload.college = to.college;
+    if (to.department) insertPayload.department = to.department;
+    if (to.programme) insertPayload.programme = to.programme;
+    if (to.programmeType) insertPayload.programmeType = to.programmeType;
+
     await CourseRegistration.updateOne(
-      { course: to._id, session, semester: semesterNum, level: levelStr },
-      { $setOnInsert: { course: to._id, session, semester: semesterNum, level: levelStr, student: [] } },
+      toMatch,
+      { $setOnInsert: insertPayload },
       { upsert: true }
     );
 
     // 2) Add to target without duplicates
     const pushRes = await CourseRegistration.updateOne(
-      { course: to._id, session, semester: semesterNum, level: levelStr },
+      toMatch,
       { $addToSet: { student: { $each: studentIds } } }
     );
 
     // 3) Pull from source (can affect many docs in same term)
+    const fromMatch = {
+      course: from._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      fromMatch.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    } else if (from.department) {
+      fromMatch.department = from.department;
+    }
+
     const pullRes = await CourseRegistration.updateMany(
-      { course: from._id, session, semester: semesterNum, level: levelStr },
+      fromMatch,
       { $pull: { student: { $in: studentIds } } }
     );
 
@@ -1048,6 +1219,69 @@ export async function moveRegisteredStudents(req, res) {
     });
   } catch (error) {
     console.error('moveRegisteredStudents (no-txn) error:', error);
+    return res.status(500).json({ ok: false, message: 'Server error', error: error.message });
+  }
+}
+
+/**
+ * DELETE /api/course-registration/registrations/course
+ * Remove all registrations for a course within a session/semester/level.
+ */
+export async function deleteCourseRegistrations(req, res) {
+  try {
+    const { session, semester, level, course } = req.body || {};
+
+    if (!session || !semester || !level || !course) {
+      return res.status(400).json({ ok: false, message: 'session, semester, level and course are required.' });
+    }
+
+    const semesterNum = Number(semester);
+    if (![1, 2].includes(semesterNum)) {
+      return res.status(400).json({ ok: false, message: 'semester must be 1 or 2.' });
+    }
+
+    const levelStr = String(level);
+    const allowedLevels = new Set(['100', '200', '300', '400']);
+    if (!allowedLevels.has(levelStr)) {
+      return res.status(400).json({ ok: false, message: 'level must be one of 100, 200, 300, 400.' });
+    }
+
+    let courseDoc = null;
+    if (mongoose.isValidObjectId(course)) {
+      courseDoc = await Course.findById(course).select('_id code title department college');
+    } else {
+      courseDoc = await Course.findOne({ code: String(course).trim() }).select('_id code title department college');
+    }
+    if (!courseDoc) {
+      return res.status(404).json({ ok: false, message: 'Course not found.' });
+    }
+
+    ensureResourceMatchesUserScope(req.user, courseDoc);
+
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    const deleteMatch = {
+      course: courseDoc._id,
+      session,
+      semester: semesterNum,
+      level: levelStr,
+    };
+    if (scopeFilter.department) {
+      deleteMatch.department = new mongoose.Types.ObjectId(scopeFilter.department);
+    }
+
+    const result = await CourseRegistration.deleteMany(deleteMatch);
+
+    return res.json({
+      ok: true,
+      removedDocs: result.deletedCount || 0,
+      course: {
+        id: courseDoc._id,
+        code: courseDoc.code,
+        title: courseDoc.title,
+      },
+    });
+  } catch (error) {
+    console.error('deleteCourseRegistrations error:', error);
     return res.status(500).json({ ok: false, message: 'Server error', error: error.message });
   }
 }

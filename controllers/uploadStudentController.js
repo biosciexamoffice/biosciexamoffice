@@ -2,14 +2,17 @@ import multer from 'multer';
 import csvParser from 'csv-parser';
 import stream from 'stream';
 import Student from '../models/student.js';
-
-
+import {
+  buildInstitutionLookups,
+  resolveInstitutionByNames,
+} from '../services/institutionService.js';
+import { ensureUserCanAccessDepartment } from '../services/accessControl.js';
 
 const storage = multer.memoryStorage();
 
 export const upload = multer({ storage });
 
-const validLevels = ['100', '200', '300', '400']
+const validLevels = ['100', '200', '300', '400', '500'];
 
 export const uploadStudents = async (req, res) => {
   const { level } = req.body;
@@ -23,7 +26,7 @@ export const uploadStudents = async (req, res) => {
   }
 
   if (!validLevels.includes(level)) {
-    return res.status(400).json({ message: "Level must be 100, 200, 300, 400" });
+    return res.status(400).json({ message: "Level must be 100, 200, 300, 400, or 500" });
   }
 
   const rows = [];
@@ -51,19 +54,39 @@ export const uploadStudents = async (req, res) => {
     const studentDocs = [];
     const validationErrors = [];
     const regNos = new Set(); // Track regNos for duplicates
+    const lookups = await buildInstitutionLookups();
 
-    rows.forEach((row, index) => {
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
       // Normalize regNo by trimming and converting to lowercase
       const regNo = row.regNo?.trim().toUpperCase();
+      const surname = row.surname?.trim();
+      const firstname = row.firstname?.trim();
+      const middlename = row.middlename?.trim();
+      const collegeValue = row.college?.trim() || row.collegeName?.trim() || row.collegeCode?.trim();
+      const departmentValue =
+        row.department?.trim() || row.departmentName?.trim() || row.departmentCode?.trim();
+      const programmeValue = row.programme?.trim() || row.programmeName?.trim();
+      const degreeTypeValue = row.degreeType?.trim() || row.programmeType?.trim() || '';
       
-      if (!regNo || !row.surname || !row.firstname) {
+      if (!regNo || !surname || !firstname) {
         validationErrors.push({
           line: index + 1,
           regNo: regNo || 'N/A',
           error: 'Missing Required Field(s)',
           rowData: row
         });
-        return;
+        continue;
+      }
+
+      if (!collegeValue || !departmentValue || !programmeValue) {
+        validationErrors.push({
+          line: index + 1,
+          regNo,
+          error: 'College, department, and programme are required for each row.',
+          rowData: row,
+        });
+        continue;
       }
 
       // Check for duplicates within the CSV
@@ -73,19 +96,55 @@ export const uploadStudents = async (req, res) => {
           regNo,
           error: 'Duplicate regNo within CSV file'
         });
-        return;
+        continue;
+      }
+
+      let institution;
+      try {
+        institution = await resolveInstitutionByNames(
+          {
+            collegeNameOrCode: collegeValue,
+            departmentNameOrCode: departmentValue,
+            programmeName: programmeValue,
+            degreeType: degreeTypeValue,
+          },
+          lookups,
+        );
+      } catch (err) {
+        validationErrors.push({
+          line: index + 1,
+          regNo,
+          error: err.message || 'Invalid institution details provided.',
+          rowData: row,
+        });
+        continue;
+      }
+
+      try {
+        ensureUserCanAccessDepartment(req.user, institution.department._id, institution.college._id);
+      } catch (err) {
+        validationErrors.push({
+          line: index + 1,
+          regNo,
+          error: err.message || 'You are not authorized to manage the specified department.',
+          rowData: row,
+        });
+        continue;
       }
 
       regNos.add(regNo);
 
       studentDocs.push({
-        surname: row.surname.trim(),
-        firstname: row.firstname.trim(),
-        middlename: row.middlename?.trim(),
+        surname,
+        firstname,
+        middlename,
         regNo,
-        level
+        level,
+        college: institution.college._id,
+        department: institution.department._id,
+        programme: institution.programme._id,
       });
-    });
+    }
 
     
 

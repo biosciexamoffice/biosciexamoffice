@@ -16,6 +16,7 @@ import {
   listStandingRecords,
 } from "../controllers/studentController.js";
 import { uploadStudents, upload } from "../controllers/uploadStudentController.js";
+import { authenticate } from "../middlewares/authMiddleware.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,6 +62,8 @@ const passportUpload = multer({
 });
 
 const studentRoute = express.Router();
+
+studentRoute.use(authenticate);
 
 studentRoute.post("/", CreateStudent);
 studentRoute.get("/", getAllStudent);

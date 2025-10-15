@@ -5,6 +5,12 @@ import mongoose from "mongoose";
 import Student from "../models/student.js";
 import Session from "../models/session.js";
 import StandingRecord from "../models/standingRecord.js";
+import { validateInstitutionHierarchy } from "../services/institutionService.js";
+import {
+  buildDepartmentScopeFilter,
+  ensureResourceMatchesUserScope,
+  ensureUserCanAccessDepartment,
+} from "../services/accessControl.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +37,30 @@ const removeExistingFile = async (storedPath) => {
   } catch {
     // Ignore missing file errors
   }
+};
+
+const normalizeInstitutionField = (value, fields = []) => {
+  if (!value) return null;
+
+  // Handle ObjectId
+  if (value instanceof mongoose.Types.ObjectId) {
+    return { id: value.toString() };
+  }
+
+  // Handle populated document or plain object
+  if (typeof value === 'object') {
+    const id = value._id || value.id || value.toString?.();
+    const normalized = { id: id ? id.toString() : null };
+    fields.forEach((field) => {
+      if (value[field] !== undefined) {
+        normalized[field] = value[field] ?? null;
+      }
+    });
+    return normalized;
+  }
+
+  // Fallback for string/number
+  return { id: String(value) };
 };
 
 const serializeStudent = (studentDoc, includePassportData = false) => {
@@ -68,21 +98,66 @@ const serializeStudent = (studentDoc, includePassportData = false) => {
     student.standingEvidence = null;
   }
 
+  const college = normalizeInstitutionField(studentDoc.college || student.college, ['name', 'code']);
+  const department = normalizeInstitutionField(studentDoc.department || student.department, ['name', 'code']);
+  const programme = normalizeInstitutionField(studentDoc.programme || student.programme, [
+    'name',
+    'degreeType',
+    'description',
+  ]);
+
+  student.college = college;
+  student.department = department;
+  student.programme = programme;
+  student.collegeId = college?.id || null;
+  student.departmentId = department?.id || null;
+  student.programmeId = programme?.id || null;
+
   return student;
 };
 
 export const CreateStudent = async (req, res) => {
   try {
-    const newStudent = await Student.create(req.body);
-    await newStudent.save();
-    res.status(201).json(serializeStudent(newStudent, false));
+    const {
+      collegeId,
+      departmentId,
+      programmeId,
+      ...studentPayload
+    } = req.body || {};
+
+    const { college, department, programme } = await validateInstitutionHierarchy({
+      collegeId,
+      departmentId,
+      programmeId,
+    });
+
+    ensureUserCanAccessDepartment(req.user, department._id, college._id);
+
+    const newStudent = await Student.create({
+      ...studentPayload,
+      college: college._id,
+      department: department._id,
+      programme: programme._id,
+    });
+
+    const populated = await Student.findById(newStudent._id)
+      .populate('college', 'name code')
+      .populate('department', 'name code')
+      .populate('programme', 'name degreeType description');
+
+    res.status(201).json(serializeStudent(populated, false));
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     if (error.name === "ValidationError") {
-      res.status(400).json({
+      return res.status(400).json({
         error: "Validation Error",
+        details: error.message,
       });
     } else {
-      res.status(500).json({
+      console.error("CreateStudent error:", error);
+      return res.status(500).json({
         error: "Internal Server Error",
       });
     }
@@ -93,9 +168,14 @@ export const getAllStudent = async (req, res) => {
   try {
     const regNoQuery = req.query.regNo?.toString().trim().toUpperCase();
     const baseQuery = regNoQuery ? { regNo: regNoQuery } : {};
-    const allStudent = await Student.find(baseQuery)
+    const scopeFilter = buildDepartmentScopeFilter(req.user, 'department');
+    const query = { ...baseQuery, ...scopeFilter };
+    const allStudent = await Student.find(query)
       .select("-passport.data")
-      .sort({ regNoNumeric: 1, regNoSuffix: 1 });
+      .sort({ regNoNumeric: 1, regNoSuffix: 1 })
+      .populate('college', 'name code')
+      .populate('department', 'name code')
+      .populate('programme', 'name degreeType description');
 
     res.status(200).json(allStudent.map((student) => serializeStudent(student, false)));
   } catch (error) {
@@ -113,10 +193,16 @@ export const searchStudentByRegNo = async (req, res) => {
       return res.status(400).json({ error: "Registration number is required" });
     }
 
-    const student = await Student.findOne({ regNo }).select("+passport.data");
+    const student = await Student.findOne({ regNo })
+      .select("+passport.data")
+      .populate('college', 'name code')
+      .populate('department', 'name code')
+      .populate('programme', 'name degreeType description');
     if (!student) {
       return res.status(404).json({ error: "Student not found" });
     }
+
+    ensureResourceMatchesUserScope(req.user, student);
 
     res.status(200).json(serializeStudent(student, true));
   } catch (error) {
@@ -127,13 +213,18 @@ export const searchStudentByRegNo = async (req, res) => {
 
 export const getStudentById = async (req, res) => {
   try {
-    const foundStudent = await Student.findById(req.params.id).select("+passport.data");
+    const foundStudent = await Student.findById(req.params.id)
+      .select("+passport.data")
+      .populate('college', 'name code')
+      .populate('department', 'name code')
+      .populate('programme', 'name degreeType description');
 
     if (!foundStudent) {
       return res.status(404).json({
         error: "Student not found",
       });
     }
+    ensureResourceMatchesUserScope(req.user, foundStudent);
     res.status(200).json(serializeStudent(foundStudent, true));
   } catch (error) {
     console.error("Student not found", error);
@@ -145,13 +236,52 @@ export const getStudentById = async (req, res) => {
 
 export const updateStudent = async (req, res) => {
   try {
-    const toUpdate = req.body;
+    const {
+      collegeId,
+      departmentId,
+      programmeId,
+      ...updates
+    } = req.body || {};
+
+    const existingStudent = await Student.findById(req.params.id).select('college department');
+    if (!existingStudent) {
+      return res.status(404).json({
+        error: "failed to update student",
+      });
+    }
+
+    ensureUserCanAccessDepartment(req.user, existingStudent.department, existingStudent.college);
+
+    delete updates.college;
+    delete updates.department;
+    delete updates.programme;
+
+    if ([collegeId, departmentId, programmeId].some((value) => value !== undefined)) {
+      if (![collegeId, departmentId, programmeId].every((value) => value)) {
+        return res.status(400).json({
+          error: "collegeId, departmentId, and programmeId are all required when updating institutional details.",
+        });
+      }
+      const { college, department, programme } = await validateInstitutionHierarchy({
+        collegeId,
+        departmentId,
+        programmeId,
+      });
+      ensureUserCanAccessDepartment(req.user, department._id, college._id);
+      updates.college = college._id;
+      updates.department = department._id;
+      updates.programme = programme._id;
+    }
 
     const updatedStudent = await Student.findByIdAndUpdate(
       req.params.id,
-      toUpdate,
+      updates,
       { new: true, runValidators: true }
-    ).select("-passport.data");
+    )
+      .select("-passport.data")
+      .populate('college', 'name code')
+      .populate('department', 'name code')
+      .populate('programme', 'name degreeType description');
 
     if (!updatedStudent) {
       return res.status(404).json({
@@ -261,6 +391,8 @@ export const updateStudentStanding = async (req, res) => {
       return res.status(404).json({ error: "Student not found" });
     }
 
+    ensureUserCanAccessDepartment(req.user, student.department, student.college);
+
     let documentPath = student.standingEvidence?.documentPath || null;
     let documentName = student.standingEvidence?.documentName || null;
 
@@ -348,6 +480,8 @@ export const updateStudentPassport = async (req, res) => {
       return res.status(404).json({ error: "Student not found" });
     }
 
+    ensureUserCanAccessDepartment(req.user, student.department, student.college);
+
     student.passport = {
       data: file.buffer,
       contentType: file.mimetype,
@@ -372,6 +506,8 @@ export const deleteStudentPassport = async (req, res) => {
     if (!student) {
       return res.status(404).json({ error: "Student not found" });
     }
+
+    ensureUserCanAccessDepartment(req.user, student.department, student.college);
 
     const hasPassport =
       Boolean(student.passport?.data && student.passport.data.length) ||
@@ -400,13 +536,17 @@ export const deleteStudentPassport = async (req, res) => {
 
 export const deleteStudent = async (req, res) => {
   try {
-    const deleteStudent = await Student.findByIdAndDelete(req.params.id);
-    if (!deleteStudent) {
+    const student = await Student.findById(req.params.id);
+    if (!student) {
       return res.status(404).json({
         error: "Student not found",
       });
     }
-    if (deleteStudent.standingEvidence?.documentPath) {
+
+    ensureUserCanAccessDepartment(req.user, student.department, student.college);
+
+    const deleteStudent = await Student.findByIdAndDelete(req.params.id);
+    if (deleteStudent?.standingEvidence?.documentPath) {
       await removeExistingFile(deleteStudent.standingEvidence.documentPath);
     }
     res.status(200).json({ message: "Student profile deleted successfully" });
@@ -429,6 +569,7 @@ export const listStandingRecords = async (req, res) => {
     const standingFilter = req.query.standing?.toString().trim().toLowerCase();
     const sessionFilter = req.query.sessionId?.toString().trim();
     const regNoFilter = req.query.regNo?.toString().trim().toUpperCase();
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
 
     const query = {};
     if (standingFilter) {
@@ -445,11 +586,16 @@ export const listStandingRecords = async (req, res) => {
       query.session = sessionFilter;
     }
 
+    const studentMatch = regNoFilter ? { regNo: regNoFilter } : {};
+    if (scopeFilter.department) {
+      studentMatch.department = scopeFilter.department;
+    }
+
     const records = await StandingRecord.find(query)
       .populate({
         path: "student",
-        select: "surname firstname middlename regNo level standing status",
-        match: regNoFilter ? { regNo: regNoFilter } : undefined,
+        select: "surname firstname middlename regNo level standing status department",
+        match: studentMatch,
       })
       .populate({
         path: "session",

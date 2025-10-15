@@ -16,6 +16,10 @@ const resultSchema = new Schema({
         ref: "Lecturer",
         required: true
     },
+    college: {
+        type: String,
+        default: ''
+    },
     department:{
         type: String,
         required: true

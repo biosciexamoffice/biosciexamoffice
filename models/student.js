@@ -39,6 +39,24 @@ const studentSchema = new Schema({
         enum: ['UE', 'DE'],
         index: true
     },
+    college: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'College',
+        required: true,
+        index: true,
+    },
+    department: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Department',
+        required: true,
+        index: true,
+    },
+    programme: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Programme',
+        required: true,
+        index: true,
+    },
     level: {
         type: String,
         required: [true, "Level is required"],

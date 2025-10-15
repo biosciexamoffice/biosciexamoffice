@@ -7,6 +7,14 @@ import CourseRegistration from "../models/courseRegistration.js";
 import calculateAcademicMetrics from '../utills/calculateAcademicMetrics.js';
 import AcademicMetrics from '../models/academicMetrics.js';
 import mongoose from 'mongoose';
+import {
+  buildDepartmentScopeFilter,
+  ensureResourceMatchesUserScope,
+  ensureUserCanAccessDepartment,
+} from '../services/accessControl.js';
+
+const DEFAULT_DEPARTMENT_NAME = 'Biochemistry';
+const DEFAULT_COLLEGE_NAME = 'Biological Science';
 
 
 // === helper: letter grade from numeric total ===
@@ -72,6 +80,30 @@ async function computeAttemptedCourses(studentId, session, semester, level) {
   return attempted;
 }
 
+const studentInstitutionCache = new Map();
+
+async function getStudentInstitution(studentId) {
+  if (!studentId) {
+    return { departmentName: '', collegeName: '' };
+  }
+  const key = String(studentId);
+  if (studentInstitutionCache.has(key)) {
+    return studentInstitutionCache.get(key);
+  }
+  const doc = await Student.findById(studentId)
+    .populate('department', 'name')
+    .populate('college', 'name')
+    .select('_id department college')
+    .lean();
+
+  const info = {
+    departmentName: doc?.department?.name || '',
+    collegeName: doc?.college?.name || '',
+  };
+  studentInstitutionCache.set(key, info);
+  return info;
+}
+
 // Create
 export const createResult = async (req, res) => {
   try {
@@ -95,15 +127,23 @@ export const createResult = async (req, res) => {
     } = req.body;
 
     // --- required fields sanity ---
-    if (!course || !studentRegNo || !lecturerStaffId || !department || !session || !semester || !date || !level || !resultType) {
+    if (!course || !studentRegNo || !lecturerStaffId || !session || !semester || !date || !level || !resultType) {
       return res.status(400).json({ message: "Missing required fields." });
     }
 
     // --- resolve course/student/lecturer ---
-    const courseDoc = await Course.findById(course).select("_id unit").lean();
+    const courseDoc = await Course.findById(course)
+      .select("_id unit department college programme programmeType")
+      .lean();
     if (!courseDoc) return res.status(404).json({ message: "Course not found." });
 
-    const student = await Student.findOne({ regNo: studentRegNo }).select("_id level").lean();
+    ensureUserCanAccessDepartment(req.user, courseDoc.department, courseDoc.college);
+
+    const student = await Student.findOne({ regNo: studentRegNo })
+      .populate('department', 'name')
+      .populate('college', 'name')
+      .select("_id level department college")
+      .lean();
     if (!student) return res.status(404).json({ message: `Student with regNo "${studentRegNo}" not found.` });
 
     const lecturer = await Lecturer.findOne({ pfNo: lecturerStaffId }).select("_id").lean();
@@ -127,6 +167,18 @@ export const createResult = async (req, res) => {
     const caNumProvided = hasCA ? Math.max(0, Number(n(ca) || 0)) : undefined;
     const grandProvided = hasGrand ? Math.min(100, Math.max(0, Number(n(grandtotal) || 0))) : undefined;
 
+    const resolvedDepartment =
+      (student.department && typeof student.department === 'object' && student.department !== null
+        ? student.department.name
+        : '') ||
+      (typeof department === 'string' ? department : '');
+    const resolvedCollege =
+      (student.college && typeof student.college === 'object' && student.college !== null
+        ? student.college.name
+        : '') || '';
+    const fallbackDepartment = resolvedDepartment || DEFAULT_DEPARTMENT_NAME;
+    const fallbackCollege = resolvedCollege || DEFAULT_COLLEGE_NAME;
+
     // === Mode selection ===
     // SIMPLE: grandtotal provided AND no CA AND no Q’s → trust grand total
     // DETAILED: otherwise, compute from CA + Q’s (missing pieces default to 0)
@@ -134,7 +186,8 @@ export const createResult = async (req, res) => {
       course: courseDoc._id,
       student: student._id,
       lecturer: lecturer._id,
-      department: String(department),
+      department: String(fallbackDepartment),
+      college: String(fallbackCollege),
       session: String(session),
       semester: Number(semester),
       date: new Date(date),
@@ -194,7 +247,6 @@ export const createResult = async (req, res) => {
     }
 
     const newResult = await Result.create(payload);
-    console.log(newResult)
     return res.status(201).json(newResult);
   } catch (error) {
     console.error("Error creating result:", error);
@@ -211,11 +263,17 @@ export const getAllResults = async (req, res) => {
     const { regNo, courseCode, session, level, semester, name, q } = req.query;
     const pipeline = [];
 
-    pipeline.push({ $lookup: { from: 'students',  localField: 'student',   foreignField: '_id', as: 'studentInfo' }});
-    pipeline.push({ $unwind: '$studentInfo' });
-    pipeline.push({ $lookup: { from: 'courses',   localField: 'course',    foreignField: '_id', as: 'courseInfo' }});
-    pipeline.push({ $unwind: '$courseInfo' });
-    pipeline.push({ $lookup: { from: 'lecturers', localField: 'lecturer',  foreignField: '_id', as: 'lecturerInfo' }});
+  pipeline.push({ $lookup: { from: 'students',  localField: 'student',   foreignField: '_id', as: 'studentInfo' }});
+  pipeline.push({ $unwind: '$studentInfo' });
+  pipeline.push({ $lookup: { from: 'courses',   localField: 'course',    foreignField: '_id', as: 'courseInfo' }});
+  pipeline.push({ $unwind: '$courseInfo' });
+  const scopeFilter = buildDepartmentScopeFilter(req.user);
+  if (scopeFilter.department) {
+    pipeline.push({
+      $match: { 'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department) },
+    });
+  }
+  pipeline.push({ $lookup: { from: 'lecturers', localField: 'lecturer',  foreignField: '_id', as: 'lecturerInfo' }});
     pipeline.push({ $unwind: { path: '$lecturerInfo', preserveNullAndEmptyArrays: true }});
 
     const andFilters = [];
@@ -317,10 +375,14 @@ export const getResultById = async (req, res) => {
   try {
     const result = await Result.findById(req.params.id)
       .populate("student", "surname firstname regNo")
-      .populate("course", "title code")
+      .populate("course", "title code department college")
       .populate("lecturer", "title surname firstname");
 
     if (!result) return res.status(404).json({ message: "Result not found" });
+    if (!result.course) {
+      return res.status(404).json({ message: "Associated course not found" });
+    }
+    ensureResourceMatchesUserScope(req.user, result.course);
     res.status(200).json(result);
   } catch (error) {
     console.error("Error fetching result:", error);
@@ -339,6 +401,12 @@ export const updateResult = async (req, res) => {
     // Load the doc (we need values to compute grade, detect changes, and recompute metrics)
     const result = await Result.findById(id);
     if (!result) return res.status(404).json({ message: "Result not found" });
+
+    const courseDoc = await Course.findById(result.course).select('_id department college').lean();
+    if (!courseDoc) {
+      return res.status(404).json({ message: "Associated course not found" });
+    }
+    ensureUserCanAccessDepartment(req.user, courseDoc.department, courseDoc.college);
 
     const payload = req.body || {};
     const hasGrand = Object.prototype.hasOwnProperty.call(payload, 'grandtotal');
@@ -469,6 +537,18 @@ export const updateResult = async (req, res) => {
       }
     }
 
+    const { departmentName: currentDepartmentName, collegeName: currentCollegeName } = await getStudentInstitution(result.student);
+
+    const normalizedDepartmentName = currentDepartmentName || result.department || DEFAULT_DEPARTMENT_NAME;
+    const normalizedCollegeName = currentCollegeName || result.college || DEFAULT_COLLEGE_NAME;
+
+    result.department = normalizedDepartmentName;
+    result.college = normalizedCollegeName;
+    studentInstitutionCache.set(String(result.student), {
+      departmentName: normalizedDepartmentName,
+      collegeName: normalizedCollegeName,
+    });
+
     // Persist the result first (validates enum grade etc.)
     const saved = await result.save();
 
@@ -502,7 +582,13 @@ export const updateResult = async (req, res) => {
           semester: saved.semester,
           level: saved.level
         },
-        { ...current, previousMetrics },
+        {
+          ...current,
+          previousMetrics,
+          department: normalizedDepartmentName,
+          college: normalizedCollegeName,
+          lastUpdated: new Date(),
+        },
         { upsert: true }
       );
     } else {
@@ -535,6 +621,10 @@ export const deleteResult = async (req, res) => {
   try {
     const result = await Result.findById(req.params.id).populate('student').populate('course');
     if (!result) return res.status(404).json({ message: "Result not found" });
+    if (!result.course) {
+      return res.status(404).json({ message: "Associated course not found" });
+    }
+    ensureResourceMatchesUserScope(req.user, result.course);
 
     await Result.findByIdAndDelete(result._id);
 
@@ -559,6 +649,10 @@ export const deleteResult = async (req, res) => {
       CGPA: previousMetricsDoc.CGPA
     } : { CCC: 0, CCE: 0, CPE: 0, CGPA: 0 };
 
+    const { departmentName: deletedDepartmentName, collegeName: deletedCollegeName } = await getStudentInstitution(result.student._id);
+    const deletedDepartment = deletedDepartmentName || result.department || DEFAULT_DEPARTMENT_NAME;
+    const deletedCollege = deletedCollegeName || result.college || DEFAULT_COLLEGE_NAME;
+
     if (attempted.length > 0) {
       const current = calculateAcademicMetrics(attempted, previousMetrics);
       await AcademicMetrics.findOneAndUpdate(
@@ -568,7 +662,13 @@ export const deleteResult = async (req, res) => {
           semester: result.semester,
           level: result.level
         },
-        { ...current, previousMetrics },
+        {
+          ...current,
+          previousMetrics,
+          department: deletedDepartment,
+          college: deletedCollege,
+          lastUpdated: new Date(),
+        },
         { upsert: true }
       );
     } else {
@@ -596,6 +696,8 @@ export const deleteAllResultsForCourse = async (req, res) => {
 
     const course = await Course.findById(courseId);
     if (!course) return res.status(404).json({ message: "Course not found" });
+
+    ensureUserCanAccessDepartment(req.user, course.department, course.college);
 
     const matchFilter = { course: courseId };
     if (level)    matchFilter.level   = String(level);
@@ -631,9 +733,18 @@ export const deleteAllResultsForCourse = async (req, res) => {
 
       if (attempted.length > 0) {
         const current = calculateAcademicMetrics(attempted, previousMetrics);
+        const { departmentName, collegeName } = await getStudentInstitution(g.student);
+        const normalizedDepartment = departmentName || DEFAULT_DEPARTMENT_NAME;
+        const normalizedCollege = collegeName || DEFAULT_COLLEGE_NAME;
         await AcademicMetrics.findOneAndUpdate(
           { student: g.student, session: g.session, semester: g.semester, level: g.level },
-          { ...current, previousMetrics },
+          {
+            ...current,
+            previousMetrics,
+            department: normalizedDepartment,
+            college: normalizedCollege,
+            lastUpdated: new Date(),
+          },
           { upsert: true }
         );
       } else {
@@ -657,6 +768,16 @@ export const deleteMultipleResults = async (req, res) => {
     }
 
     const results = await Result.find({ _id: { $in: ids } }).populate('course student').lean();
+    if (!results.length) {
+      return res.status(404).json({ message: "No results found for provided IDs" });
+    }
+
+    for (const r of results) {
+      if (!r.course) {
+        return res.status(404).json({ message: "Associated course not found for one or more results" });
+      }
+      ensureResourceMatchesUserScope(req.user, r.course);
+    }
 
     const groups = results.reduce((acc, r) => {
       const key = `${r.student._id}-${r.session}-${r.semester}-${r.level}`;
@@ -681,9 +802,18 @@ export const deleteMultipleResults = async (req, res) => {
 
       if (attempted.length > 0) {
         const current = calculateAcademicMetrics(attempted, previousMetrics);
+        const { departmentName, collegeName } = await getStudentInstitution(g.student);
+        const normalizedDepartment = departmentName || DEFAULT_DEPARTMENT_NAME;
+        const normalizedCollege = collegeName || DEFAULT_COLLEGE_NAME;
         await AcademicMetrics.findOneAndUpdate(
           { student: g.student, session: g.session, semester: g.semester, level: g.level },
-          { ...current, previousMetrics },
+          {
+            ...current,
+            previousMetrics,
+            department: normalizedDepartment,
+            college: normalizedCollege,
+            lastUpdated: new Date(),
+          },
           { upsert: true }
         );
       } else {

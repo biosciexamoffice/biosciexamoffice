@@ -2,6 +2,9 @@ import multer from 'multer';
 import csvParser from 'csv-parser';
 import stream from 'stream';
 import Course from '../models/course.js';
+import { validateInstitutionHierarchy } from '../services/institutionService.js';
+import { DEFAULT_PROGRAMME } from '../constants/institutionDefaults.js';
+import { ensureUserCanAccessDepartment } from '../services/accessControl.js';
 
 const storage = multer.memoryStorage();
 export const upload = multer({ 
@@ -19,27 +22,50 @@ export const upload = multer({
 
 export const uploadCourses = async (req, res) => {
   // 1. Validate input parameters
-  const { level, semester } = req.body;
+  const { level, semester, collegeId, departmentId, programmeId } = req.body;
   
   if (!req.file) {
     return res.status(400).json({ message: 'No CSV file uploaded' });
   }
 
-  if (!level || !semester) {
-    return res.status(400).json({ message: 'Semester and Level are required.' });
+  if (!level || !semester || !collegeId || !departmentId || !programmeId) {
+    return res.status(400).json({ message: 'Semester, Level, collegeId, departmentId, and programmeId are required.' });
   }
 
   // 2. Validate semester and level values
   const validSemesters = [1, 2];
-  const validLevels = ['100', '200', '300', '400'];
+  const validLevels = ['100', '200', '300', '400', '500'];
 
   if (!validSemesters.includes(Number(semester))) {
     return res.status(400).json({ message: 'Semester must be 1 or 2' });
   }
 
   if (!validLevels.includes(level)) {
-    return res.status(400).json({ message: 'Level must be 100, 200, 300, or 400' });
+    return res.status(400).json({ message: 'Level must be 100, 200, 300, 400, or 500' });
   }
+
+  let institution;
+  try {
+    institution = await validateInstitutionHierarchy({
+      collegeId,
+      departmentId,
+      programmeId,
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      message: err.message || 'Unable to resolve institution details for courses upload.',
+    });
+  }
+
+  try {
+    ensureUserCanAccessDepartment(req.user, institution.department._id, institution.college._id);
+  } catch (err) {
+    return res.status(err.statusCode || 403).json({
+      message: err.message || 'You are not authorized to manage the specified department.',
+    });
+  }
+
+  const programmeType = institution.programme.degreeType || DEFAULT_PROGRAMME.degreeType;
 
   // 3. Process CSV
   const rows = [];
@@ -104,7 +130,12 @@ export const uploadCourses = async (req, res) => {
         unit: Number(row.unit),
         option: row.option.toUpperCase(),
         semester: Number(semester),
-        level
+        level,
+        host: institution.college.name,
+        college: institution.college._id,
+        department: institution.department._id,
+        programme: institution.programme._id,
+        programmeType,
       });
     });
 

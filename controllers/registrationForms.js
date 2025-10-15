@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Student from "../models/student.js";
 import Course from "../models/course.js";
 import PassFail from "../models/passFailList.js";
+import { buildDepartmentScopeFilter } from "../services/accessControl.js";
 
 /**
  * POST /api/registration-forms
@@ -22,8 +23,16 @@ export const generateRegistrationData = async (req, res) => {
       return res.status(400).json({ message: "semester must be 1 or 2" });
     }
 
-    // b) Get students for the level
-    const students = await Student.find({ level: String(level) })
+    const departmentScope = buildDepartmentScopeFilter(req.user);
+    const departmentId = departmentScope.department || null;
+
+    // b) Get students for the level (optionally restricted by department)
+    const studentQuery = { level: String(level) };
+    if (departmentId) {
+      studentQuery.department = departmentId;
+    }
+
+    const students = await Student.find(studentQuery)
       .select("_id surname firstname middlename regNo level")
       .lean();
 
@@ -45,7 +54,7 @@ export const generateRegistrationData = async (req, res) => {
     })
       .populate({
         path: "course",
-        select: "_id code title unit option level semester",
+        select: "_id code title unit option level semester department college",
         model: Course,
       })
       .lean();
@@ -56,6 +65,9 @@ export const generateRegistrationData = async (req, res) => {
     for (const pf of passFailDocs) {
       const course = pf.course;
       if (!course) continue;
+      if (departmentId && String(course.department) !== departmentId) {
+        continue;
+      }
 
       // Optional: if you want to restrict by course.level === selected level
       // if (String(course.level) !== String(level)) continue;

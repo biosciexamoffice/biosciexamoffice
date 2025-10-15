@@ -1,11 +1,75 @@
 import mongoose from 'mongoose';
 
+const officerApprovalSchema = new mongoose.Schema({
+  approved: {
+    type: Boolean,
+    default: false,
+  },
+  flagged: {
+    type: Boolean,
+    default: false,
+  },
+  name: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  title: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  surname: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  firstname: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  middlename: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  department: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  college: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  note: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  updatedAt: {
+    type: Date,
+  },
+}, { _id: false });
+
 const academicMetricsSchema = new mongoose.Schema({
   student: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Student',
     required: true,
     index: true
+  },
+  department: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  college: {
+    type: String,
+    trim: true,
+    default: '',
   },
   session: {
     type: String,
@@ -97,27 +161,16 @@ const academicMetricsSchema = new mongoose.Schema({
     }
   },
   ceoApproval: {
-    approved: {
-      type: Boolean,
-      default: false,
-    },
-    flagged: {
-      type: Boolean,
-      default: false,
-    },
-    name: {
-      type: String,
-      trim: true,
-      default: '',
-    },
-    note: {
-      type: String,
-      trim: true,
-      default: '',
-    },
-    updatedAt: {
-      type: Date,
-    },
+    type: officerApprovalSchema,
+    default: () => ({}),
+  },
+  hodApproval: {
+    type: officerApprovalSchema,
+    default: () => ({}),
+  },
+  deanApproval: {
+    type: officerApprovalSchema,
+    default: () => ({}),
   },
 }, {
   timestamps: true,
@@ -127,7 +180,7 @@ const academicMetricsSchema = new mongoose.Schema({
 
 // Compound index to ensure one record per student per session/semester/level
 academicMetricsSchema.index(
-  { student: 1, session: 1, semester: 1, level: 1 }, 
+  { student: 1, session: 1, semester: 1, level: 1 },
   { unique: true }
 );
 

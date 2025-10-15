@@ -3,11 +3,146 @@ import Session from "../models/session.js";
 import Student from "../models/student.js";
 import Lecturer from "../models/lecturer.js";
 import Result from "../models/result.js";
+import AcademicMetrics from "../models/academicMetrics.js";
 
 const sessionCache = new Map();
 
 const invalidateSessionCache = () => {
   sessionCache.clear();
+};
+
+const createEmptyCloseSummary = () => ({
+  canClose: false,
+  blockingReasons: [],
+  summary: {
+    metrics: { total: 0, approved: 0, pending: 0, bySemester: {} },
+    results: { total: 0, students: 0 },
+    students: { finalYearActive: 0, withMetrics: 0 },
+  },
+  checkedAt: new Date().toISOString(),
+});
+
+const computeSessionCloseSummary = async (
+  sessionDoc,
+  { mongooseSession } = {}
+) => {
+  const base = createEmptyCloseSummary();
+
+  if (!sessionDoc) {
+    base.blockingReasons.push("Session not found.");
+    return base;
+  }
+
+  const sessionTitle = sessionDoc.sessionTitle;
+  base.sessionTitle = sessionTitle || "";
+
+  if (!sessionTitle) {
+    base.blockingReasons.push("Session title is missing.");
+    return base;
+  }
+
+  try {
+    const resultCountQuery = Result.countDocuments({ session: sessionTitle });
+    if (mongooseSession) resultCountQuery.session(mongooseSession);
+    const totalResults = await resultCountQuery.exec();
+
+    let resultStudentQuery = Result.distinct("student", {
+      session: sessionTitle,
+    });
+    if (mongooseSession) resultStudentQuery = resultStudentQuery.session(mongooseSession);
+    const resultStudentIds = await resultStudentQuery.exec();
+
+    const metricsPipeline = [
+      { $match: { session: sessionTitle, level: 400 } },
+      {
+        $group: {
+          _id: "$semester",
+          total: { $sum: 1 },
+          approved: {
+            $sum: {
+              $cond: [{ $eq: ["$ceoApproval.approved", true] }, 1, 0],
+            },
+          },
+        },
+      },
+    ];
+
+    let metricsAggregate = AcademicMetrics.aggregate(metricsPipeline);
+    if (mongooseSession) metricsAggregate = metricsAggregate.session(mongooseSession);
+    const metricsAgg = await metricsAggregate.exec();
+
+    const metricsSummary = {
+      total: 0,
+      approved: 0,
+      pending: 0,
+      bySemester: {},
+    };
+    metricsAgg.forEach(({ _id: semester, total, approved }) => {
+      const pending = total - approved;
+      metricsSummary.total += total;
+      metricsSummary.approved += approved;
+      metricsSummary.pending += pending;
+      metricsSummary.bySemester[String(semester)] = {
+        total,
+        approved,
+        pending,
+      };
+    });
+
+    let metricStudentsQuery = AcademicMetrics.distinct("student", {
+      session: sessionTitle,
+      level: 400,
+    });
+    if (mongooseSession)
+      metricStudentsQuery = metricStudentsQuery.session(mongooseSession);
+    const metricsStudentIds = await metricStudentsQuery.exec();
+
+    const finalYearQuery = Student.countDocuments({
+      level: { $in: ["400", "400L"] },
+      status: { $in: ["undergraduate", "extraYear"] },
+    });
+    if (mongooseSession) finalYearQuery.session(mongooseSession);
+    const finalYearActive = await finalYearQuery.exec();
+
+    base.summary.results = {
+      total: totalResults,
+      students: resultStudentIds.length,
+    };
+    base.summary.metrics = metricsSummary;
+    base.summary.students = {
+      finalYearActive,
+      withMetrics: metricsStudentIds.length,
+    };
+
+    if (!totalResults) {
+      base.blockingReasons.push(
+        "No results recorded for this session."
+      );
+    }
+    if (!metricsSummary.total) {
+      base.blockingReasons.push(
+        "Academic metrics have not been computed for 400 level."
+      );
+    } else if (metricsSummary.pending > 0) {
+      base.blockingReasons.push(
+        `${metricsSummary.pending} academic metric record(s) pending approval for 400 level.`
+      );
+    }
+  } catch (error) {
+    base.blockingReasons.push(
+      "Unable to evaluate session closing prerequisites."
+    );
+    base.error = error.message;
+  }
+
+  const alreadyCompleted = sessionDoc.status === "completed";
+  if (alreadyCompleted) {
+    base.blockingReasons.unshift("Session already marked as completed.");
+  }
+
+  base.canClose = base.blockingReasons.length === 0 && !alreadyCompleted;
+  base.checkedAt = new Date().toISOString();
+  return base;
 };
 
 const formatLecturerName = (lecturerDoc) => {
@@ -190,7 +325,9 @@ export const createSession = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Session created successfully",
-      session: formatSessionResponse(createdSession),
+      session: formatSessionResponse(createdSession, {
+        closeSummary: createEmptyCloseSummary(),
+      }),
     });
   } catch (error) {
     await dbSession.abortTransaction();
@@ -227,6 +364,21 @@ export const closeSession = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Session has already been closed",
+      });
+    }
+
+    const closeSummary = await computeSessionCloseSummary(sessionDoc, {
+      mongooseSession: dbSession,
+    });
+
+    if (!closeSummary.canClose) {
+      await dbSession.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message:
+          "Session cannot be closed yet. Complete outstanding result processing tasks first.",
+        blockers: closeSummary.blockingReasons,
+        closeSummary,
       });
     }
 
@@ -288,7 +440,14 @@ export const closeSession = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "Session closed successfully",
-      session: formatSessionResponse(sessionDoc.toObject()),
+      session: formatSessionResponse(sessionDoc.toObject(), {
+        closeSummary: {
+          ...closeSummary,
+          canClose: false,
+          blockingReasons: ["Session already marked as completed."],
+          checkedAt: new Date().toISOString(),
+        },
+      }),
     });
   } catch (error) {
     await dbSession.abortTransaction();
@@ -315,11 +474,32 @@ export const getSessions = async (_req, res) => {
     }
 
     const sessions = await Session.find()
-      .populate("dean hod eo", "title surname firstname middlename pfNo department rank")
+      .populate(
+        "dean hod eo",
+        "title surname firstname middlename pfNo department rank"
+      )
       .sort({ startDate: -1 })
       .lean();
 
-    const formatted = sessions.map((session) => formatSessionResponse(session));
+    const formatted = await Promise.all(
+      sessions.map(async (session) => {
+        const normalizedStatus =
+          typeof session.status === "string"
+            ? session.status.toLowerCase()
+            : "";
+        const isCurrent =
+          typeof session.isCurrent === "boolean"
+            ? session.isCurrent
+            : normalizedStatus !== "completed";
+
+        let closeSummary = null;
+        if (isCurrent && normalizedStatus !== "completed") {
+          closeSummary = await computeSessionCloseSummary(session);
+        }
+
+        return formatSessionResponse(session, { closeSummary });
+      })
+    );
 
     const payload = { count: formatted.length, sessions: formatted };
     sessionCache.set(cacheKey, payload);
@@ -352,7 +532,10 @@ export const getCurrentSession = async (_req, res) => {
     }
 
     const currentSession = await Session.findOne({ isCurrent: true })
-      .populate("dean hod eo", "title surname firstname middlename pfNo department rank")
+      .populate(
+        "dean hod eo",
+        "title surname firstname middlename pfNo department rank"
+      )
       .lean();
 
     if (!currentSession) {
@@ -362,7 +545,8 @@ export const getCurrentSession = async (_req, res) => {
       });
     }
 
-    const formatted = formatSessionResponse(currentSession);
+    const closeSummary = await computeSessionCloseSummary(currentSession);
+    const formatted = formatSessionResponse(currentSession, { closeSummary });
     sessionCache.set(cacheKey, formatted);
     setTimeout(() => sessionCache.delete(cacheKey), 60000);
 
@@ -405,7 +589,7 @@ const officerFromSnapshot = (snapshot, fallback) => {
   };
 };
 
-const formatSessionResponse = (session) => {
+const formatSessionResponse = (session, options = {}) => {
   if (!session) return null;
 
   const officers = {
@@ -432,16 +616,24 @@ const formatSessionResponse = (session) => {
     },
     graduated: 0,
     extraYear: 0,
-    totalProcessed: 0,
+      totalProcessed: 0,
   };
+
+  const normalizedStatus =
+    typeof session.status === "string" ? session.status.toLowerCase() : "";
+  const inferredIsCurrent =
+    typeof session.isCurrent === "boolean"
+      ? session.isCurrent
+      : normalizedStatus !== "completed";
+  const status = inferredIsCurrent ? "active" : "completed";
 
   return {
     id: session._id,
     sessionTitle: session.sessionTitle,
     startDate: session.startDate,
     endDate: session.endDate,
-    status: session.status || (session.isCurrent ? "active" : "completed"),
-    isCurrent: session.isCurrent ?? session.status !== "completed",
+    status,
+    isCurrent: inferredIsCurrent,
     closedAt: session.closedAt || null,
     officers,
     dean: officers.dean,
@@ -450,6 +642,7 @@ const formatSessionResponse = (session) => {
     promotionStats,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    closeSummary: options.closeSummary ?? null,
   };
 };
 

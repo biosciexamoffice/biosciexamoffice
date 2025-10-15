@@ -4,11 +4,15 @@ import { uploadCourseRegistrations,searchCourseRegistrations,       // (your exi
   listRegistrationCourses,         // NEW: list courses with counts
   getRegistrationStudents,         // NEW: list students in a course
   deleteRegisteredStudent,
-   moveRegisteredStudents,
+  moveRegisteredStudents,
+  deleteCourseRegistrations,
 } from '../controllers/courseRegistrationUpload.controller.js';
+import { authenticate } from '../middlewares/authMiddleware.js';
 //import { uploadCourseRegistrations, searchCourseRegistrations } from '../controllers/uploadCourseRegistrations.js';
 
 const courseRegistrationRouter = express.Router();
+
+courseRegistrationRouter.use(authenticate);
 
 // Configure multer for file uploads
 const upload = multer({
@@ -71,4 +75,5 @@ courseRegistrationRouter.get('/registrations/courses', listRegistrationCourses);
 courseRegistrationRouter.get('/registrations/students', getRegistrationStudents);
 courseRegistrationRouter.delete('/registrations/student', deleteRegisteredStudent);
 courseRegistrationRouter.post('/registrations/move', moveRegisteredStudents);
+courseRegistrationRouter.delete('/registrations/course', deleteCourseRegistrations);
 export default courseRegistrationRouter;

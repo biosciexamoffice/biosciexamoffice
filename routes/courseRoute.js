@@ -7,8 +7,11 @@ import {
   deleteCourse,
 } from "../controllers/courseController.js";
 import { upload, uploadCourses } from '../controllers/uploadCourseController.js';
+import { authenticate } from '../middlewares/authMiddleware.js';
 
 const courseRouter = express.Router();
+
+courseRouter.use(authenticate);
 
 courseRouter.get('/', getAllCourses);
 courseRouter.post('/', createCourse);

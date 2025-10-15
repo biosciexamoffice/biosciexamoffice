@@ -1,5 +1,5 @@
 import mongoose, { Schema } from "mongoose";
-
+import { DEFAULT_COLLEGE } from "../constants/institutionDefaults.js";
 
 const courseSchema = Schema({
     title:{
@@ -20,7 +20,9 @@ const courseSchema = Schema({
     },
     host: {
         type: String,
-        required: true
+        required: true,
+        default: DEFAULT_COLLEGE.name,
+        trim: true,
     },
     lecturer:{
         type: Schema.Types.ObjectId,
@@ -40,7 +42,33 @@ const courseSchema = Schema({
     uamId: {
         type: String,
     }
+    ,
+    college: {
+        type: Schema.Types.ObjectId,
+        ref: 'College',
+        required: true,
+        index: true,
+    },
+    department: {
+        type: Schema.Types.ObjectId,
+        ref: 'Department',
+        required: true,
+        index: true,
+    },
+    programme: {
+        type: Schema.Types.ObjectId,
+        ref: 'Programme',
+        required: true,
+        index: true,
+    },
+    programmeType: {
+        type: String,
+        required: true,
+        trim: true,
+    }
 
 })
+
+courseSchema.index({ programme: 1, level: 1, semester: 1 });
 
 export default mongoose.model('Course', courseSchema);
