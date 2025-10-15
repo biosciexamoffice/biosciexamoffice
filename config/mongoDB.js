@@ -17,6 +17,12 @@ const redactConnectionString = (uri = '') => {
 
 const connectDB = async () => {
   try {
+    if (String(process.env.SKIP_DB_CONNECTION || '').toLowerCase() === 'true') {
+      console.warn('SKIP_DB_CONNECTION=true – skipping MongoDB connection initialization.');
+      cachedMode = (process.env.DB_MODE || 'PRIMARY').toUpperCase();
+      return;
+    }
+
     cachedMode = (process.env.DB_MODE || 'PRIMARY').toUpperCase();
     const primaryUri = process.env.MONGO_PRIMARY_URL || process.env.MONGO_URL;
     if (!primaryUri) {
