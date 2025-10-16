@@ -26,18 +26,147 @@ const PICK_UPDATED_QUERY = (since) => ({
   ],
 });
 
-const sanitizeDoc = (doc) => {
+const normalizeName = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+};
+
+const COLLECTION_SANITIZERS = {
+  users: (doc) => {
+    const clone = { ...doc };
+    if (typeof clone.email === 'string') {
+      const trimmed = clone.email.trim();
+      if (!trimmed) {
+        delete clone.email;
+      } else {
+        clone.email = trimmed.toLowerCase();
+      }
+    }
+    return clone;
+  },
+  colleges: (doc) => {
+    const clone = { ...doc };
+    if (clone.name) clone.name = normalizeName(clone.name);
+    if (clone.code) clone.code = normalizeName(clone.code);
+    return clone;
+  },
+  departments: (doc) => {
+    const clone = { ...doc };
+    if (clone.name) clone.name = normalizeName(clone.name);
+    if (clone.code) clone.code = normalizeName(clone.code);
+    return clone;
+  },
+  programmes: (doc) => {
+    const clone = { ...doc };
+    if (clone.name) clone.name = normalizeName(clone.name);
+    if (clone.code) clone.code = normalizeName(clone.code);
+    return clone;
+  },
+};
+
+const dedupeDocs = (collectionKey, docs, context = 'sync') => {
+  if (collectionKey === 'users') {
+    const seenEmails = new Set();
+    const filtered = [];
+    for (const doc of docs) {
+      const emailKey = typeof doc.email === 'string' && doc.email.length
+        ? `email:${doc.email}`
+        : null;
+      if (emailKey) {
+        if (seenEmails.has(emailKey)) {
+          console.warn(`${context} warning (${collectionKey}): skipping duplicate record for key ${emailKey}`);
+          continue;
+        }
+        seenEmails.add(emailKey);
+      }
+      filtered.push(doc);
+    }
+    return filtered;
+  }
+
+  if (collectionKey === 'colleges') {
+    const seenNames = new Set();
+    return docs.filter((doc) => {
+      const key = normalizeName(doc.name);
+      if (!key) return false;
+      if (seenNames.has(key)) {
+        console.warn(`${context} warning (${collectionKey}): skipping duplicate college with name ${key}`);
+        return false;
+      }
+      seenNames.add(key);
+      return true;
+    });
+  }
+
+  if (collectionKey === 'departments') {
+    const seenKeys = new Set();
+    const filtered = [];
+    for (const doc of docs) {
+      const nameKey = normalizeName(doc.name);
+      const collegeKey = doc.college ? String(doc.college) : '';
+      const composite = `${collegeKey}::${nameKey}`;
+      if (!nameKey) continue;
+      if (seenKeys.has(composite)) {
+        console.warn(`${context} warning (${collectionKey}): skipping duplicate department ${nameKey} for college ${collegeKey}`);
+        continue;
+      }
+      seenKeys.add(composite);
+      filtered.push(doc);
+    }
+    return filtered;
+  }
+
+  const filtered = [];
+  for (const doc of docs) {
+    filtered.push(doc);
+  }
+  return filtered;
+};
+
+const sanitizeDoc = (collectionKey, doc) => {
   if (!doc) return doc;
-  const clone = { ...doc };
+  let clone = { ...doc };
+  const sanitizer = COLLECTION_SANITIZERS[collectionKey];
+  if (sanitizer) {
+    clone = sanitizer(clone) || clone;
+  }
   if (clone._id && typeof clone._id === 'object' && clone._id._bsontype === 'ObjectID') {
-    clone._id = clone._id; // keep ObjectId
+    clone._id = clone._id;
   }
   return clone;
 };
 
-const buildBulkOps = (docs) =>
-  docs.map((doc) => {
-    const { _id, ...rest } = sanitizeDoc(doc);
+const buildBulkOps = (collectionKey, docs, context = 'sync') => {
+  const sanitizedDocs = dedupeDocs(
+    collectionKey,
+    docs.map((doc) => sanitizeDoc(collectionKey, doc)),
+    context,
+  );
+
+  return sanitizedDocs.map((doc) => {
+    const { _id, ...rest } = doc;
+    if (collectionKey === 'users') {
+      const filterOr = [];
+      if (_id) filterOr.push({ _id });
+      if (rest.email) filterOr.push({ email: rest.email });
+      const filter = filterOr.length === 0
+        ? { _id }
+        : (filterOr.length === 1 ? filterOr[0] : { $or: filterOr });
+
+      const update = { $set: rest };
+      if (_id) {
+        update.$setOnInsert = { _id };
+      }
+
+      return {
+        updateOne: {
+          filter,
+          update,
+          upsert: true,
+        },
+      };
+    }
+
     return {
       updateOne: {
         filter: { _id },
@@ -46,6 +175,7 @@ const buildBulkOps = (docs) =>
       },
     };
   });
+};
 
 const getCollection = (conn, name) => {
   if (!conn) return null;
@@ -120,7 +250,7 @@ export const pullFromAtlas = async (_req, res) => {
       continue;
     }
 
-    const ops = buildBulkOps(freshDocs);
+    const ops = buildBulkOps(key, freshDocs, 'pull');
     if (!ops.length) continue;
 
     await primaryCollection.bulkWrite(ops, { ordered: false });
@@ -225,7 +355,7 @@ export const pushToAtlas = async (_req, res) => {
       continue;
     }
 
-    const ops = buildBulkOps(freshDocs);
+    const ops = buildBulkOps(key, freshDocs, 'push');
     if (!ops.length) continue;
 
     try {
