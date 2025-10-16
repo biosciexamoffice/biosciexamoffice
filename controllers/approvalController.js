@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import AcademicMetrics from '../models/academicMetrics.js';
 import Result from '../models/result.js';
 import CourseRegistration from '../models/courseRegistration.js';
@@ -176,6 +177,74 @@ export const getPendingApprovals = async (req, res) => {
         })
       : metricsDocs;
 
+    const comboList = [];
+    const seenCombos = new Set();
+
+    filteredMetrics.forEach((metrics) => {
+      const studentId = metrics.student?._id;
+      if (!studentId) return;
+      const sessionValue = metrics.session;
+      const semesterValue = Number(metrics.semester);
+      const levelValue = String(metrics.level);
+      const comboKey = `${studentId}|${sessionValue}|${semesterValue}|${levelValue}`;
+      if (seenCombos.has(comboKey)) return;
+      seenCombos.add(comboKey);
+      comboList.push({
+        key: comboKey,
+        student: new mongoose.Types.ObjectId(studentId),
+        session: sessionValue,
+        semester: semesterValue,
+        level: levelValue,
+      });
+    });
+
+    let resultsByKey = new Map();
+    let registrationsByKey = new Map();
+
+    if (comboList.length) {
+      const orConditions = comboList.map(({ student, session, semester, level }) => ({
+        student,
+        session,
+        semester,
+        level,
+      }));
+
+      const [resultDocs, registrationDocs] = await Promise.all([
+        Result.find({ $or: orConditions })
+          .select('student session semester level course grandtotal grade resultType date')
+          .populate('course', 'code title unit option department')
+          .lean(),
+        CourseRegistration.find({ $or: orConditions })
+          .select('student session semester level course')
+          .populate('course', 'code title unit option department')
+          .lean(),
+      ]);
+
+      resultsByKey = resultDocs.reduce((map, doc) => {
+        const studentId = doc.student ? String(doc.student) : '';
+        if (!studentId) return map;
+        const key = `${studentId}|${doc.session}|${doc.semester}|${doc.level}`;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(doc);
+        return map;
+      }, new Map());
+
+      registrationsByKey = registrationDocs.reduce((map, doc) => {
+        const sessionValue = doc.session;
+        const semesterValue = doc.semester;
+        const levelValue = String(doc.level);
+        const students = Array.isArray(doc.student) ? doc.student : [doc.student];
+        students.forEach((stu) => {
+          const studentId = stu ? String(stu) : '';
+          if (!studentId) return;
+          const key = `${studentId}|${sessionValue}|${semesterValue}|${levelValue}`;
+          if (!map.has(key)) map.set(key, []);
+          map.get(key).push(doc);
+        });
+        return map;
+      }, new Map());
+    }
+
     const items = await Promise.all(
       filteredMetrics.map(async (metrics) => {
         const studentId = metrics.student?._id;
@@ -222,60 +291,45 @@ export const getPendingApprovals = async (req, res) => {
         };
         let courses = [];
 
-      if (studentId) {
-        const resultsRaw = await Result.find({
-          student: studentId,
-          session: metrics.session,
-          semester: metrics.semester,
-          level: String(metrics.level),
-        })
-          .populate('course', 'code title unit option department')
-          .sort({ course: 1 })
-          .lean();
+        if (studentId) {
+          const comboKey = `${studentId}|${metrics.session}|${Number(metrics.semester)}|${String(metrics.level)}`;
+          const resultsRaw = resultsByKey.get(comboKey) || [];
+          const registrationsRaw = registrationsByKey.get(comboKey) || [];
 
-        const results = departmentFilter
-          ? resultsRaw.filter((result) => matchesDepartment(result.course?.department))
-          : resultsRaw;
+          const results = departmentFilter
+            ? resultsRaw.filter((result) => matchesDepartment(result.course?.department))
+            : resultsRaw;
 
-        const registrationsRaw = await CourseRegistration.find({
-          session: metrics.session,
-          semester: metrics.semester,
-          level: String(metrics.level),
-          student: studentId,
-        })
-          .populate('course', 'code title unit option department')
-          .lean();
+          const registrations = departmentFilter
+            ? registrationsRaw.filter((registration) => matchesDepartment(registration.course?.department))
+            : registrationsRaw;
 
-        const registrations = departmentFilter
-          ? registrationsRaw.filter((registration) => matchesDepartment(registration.course?.department))
-          : registrationsRaw;
+          const resultMap = new Map();
+          results.forEach((result) => {
+            const courseId = String(result.course?._id || result.course || '');
+            if (!courseId) return;
+            resultMap.set(courseId, result);
+          });
 
-        const resultMap = new Map();
-        results.forEach((result) => {
-          const courseId = String(result.course?._id || result.course || '');
-          if (!courseId) return;
-          resultMap.set(courseId, result);
-        });
+          const registeredCourseMap = new Map();
+          registrations.forEach((registration) => {
+            const courseDoc = registration.course;
+            if (!courseDoc) return;
+            const courseId = String(courseDoc._id || '');
+            if (!courseId) return;
+            if (!registeredCourseMap.has(courseId)) {
+              registeredCourseMap.set(courseId, courseDoc);
+            }
+          });
 
-        const registeredCourseMap = new Map();
-        registrations.forEach((registration) => {
-          const courseDoc = registration.course;
-          if (!courseDoc) return;
-          const courseId = String(courseDoc._id || '');
-          if (!courseId) return;
-          if (!registeredCourseMap.has(courseId)) {
-            registeredCourseMap.set(courseId, courseDoc);
-          }
-        });
+          const combinedCourses = [];
 
-        const combinedCourses = [];
-
-        registeredCourseMap.forEach((courseDoc, courseId) => {
-          const result = resultMap.get(courseId);
-          if (result) {
-            const numericScore = Number(result.grandtotal ?? 0);
-            combinedCourses.push({
-              id: result._id,
+          registeredCourseMap.forEach((courseDoc, courseId) => {
+            const result = resultMap.get(courseId);
+            if (result) {
+              const numericScore = Number(result.grandtotal ?? 0);
+              combinedCourses.push({
+                id: result._id,
               courseId,
               code: courseDoc?.code || result.course?.code || '',
               title: courseDoc?.title || result.course?.title || '',
@@ -289,12 +343,12 @@ export const getPendingApprovals = async (req, res) => {
               registeredOnly: false,
             });
             resultMap.delete(courseId);
-          } else {
-            combinedCourses.push({
-              id: `reg-${studentId}-${courseId}`,
-              courseId,
-              code: courseDoc?.code || '',
-              title: courseDoc?.title || '',
+            } else {
+              combinedCourses.push({
+                id: `reg-${studentId}-${courseId}`,
+                courseId,
+                code: courseDoc?.code || '',
+                title: courseDoc?.title || '',
               unit: courseDoc?.unit ?? null,
               option: courseDoc?.option || '',
               resultType: 'Registered',
@@ -305,12 +359,11 @@ export const getPendingApprovals = async (req, res) => {
               registeredOnly: true,
             });
           }
-        });
+          });
 
-        combinedCourses.sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')));
-        courses = combinedCourses;
-
-      }
+          combinedCourses.sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')));
+          courses = combinedCourses;
+        }
 
         if (!courses.length) {
           return null;

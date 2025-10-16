@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 
 
-const lecturerSchema = mongoose.Schema({
+const lecturerSchema = new mongoose.Schema({
     title:{
         type: String,
         required: true
@@ -30,7 +30,6 @@ const lecturerSchema = mongoose.Schema({
         type: String,
         required: true
     },
-})
+}, { timestamps: true });
 
 export default mongoose.model('Lecturer', lecturerSchema);
-

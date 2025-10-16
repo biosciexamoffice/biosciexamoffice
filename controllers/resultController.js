@@ -257,33 +257,71 @@ export const createResult = async (req, res) => {
   }
 };
 
-// Read All (unchanged)
+// Read All with optional pagination
 export const getAllResults = async (req, res) => {
   try {
-    const { regNo, courseCode, session, level, semester, name, q } = req.query;
-    const pipeline = [];
+    const {
+      regNo,
+      courseCode,
+      session,
+      level,
+      semester,
+      name,
+      q,
+      course,
+      resultType,
+      limit: limitParam,
+      page: pageParam,
+    } = req.query;
 
-  pipeline.push({ $lookup: { from: 'students',  localField: 'student',   foreignField: '_id', as: 'studentInfo' }});
-  pipeline.push({ $unwind: '$studentInfo' });
-  pipeline.push({ $lookup: { from: 'courses',   localField: 'course',    foreignField: '_id', as: 'courseInfo' }});
-  pipeline.push({ $unwind: '$courseInfo' });
-  const scopeFilter = buildDepartmentScopeFilter(req.user);
-  if (scopeFilter.department) {
-    pipeline.push({
-      $match: { 'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department) },
-    });
-  }
-  pipeline.push({ $lookup: { from: 'lecturers', localField: 'lecturer',  foreignField: '_id', as: 'lecturerInfo' }});
-    pipeline.push({ $unwind: { path: '$lecturerInfo', preserveNullAndEmptyArrays: true }});
+    const limitNum = Number(limitParam);
+    const pageNum = Number(pageParam);
+    const limit = Number.isFinite(limitNum) && limitNum > 0 ? Math.min(limitNum, 500) : 0;
+    const page = Number.isFinite(pageNum) && pageNum > 0 ? pageNum : 1;
+    const skip = limit ? (page - 1) * limit : 0;
+
+    const pipeline = [];
+    const baseMatch = {};
+
+    if (session) baseMatch.session = String(session);
+    if (level) baseMatch.level = String(level);
+    if (semester) baseMatch.semester = Number(semester);
+    if (resultType) baseMatch.resultType = String(resultType).toUpperCase();
+    if (course) {
+      if (!mongoose.Types.ObjectId.isValid(course)) {
+        return res.status(400).json({ message: 'Invalid course ID supplied.' });
+      }
+      baseMatch.course = new mongoose.Types.ObjectId(course);
+    }
+
+    if (Object.keys(baseMatch).length) {
+      pipeline.push({ $match: baseMatch });
+    }
+
+    pipeline.push(
+      { $lookup: { from: 'students', localField: 'student', foreignField: '_id', as: 'studentInfo' } },
+      { $unwind: '$studentInfo' },
+      { $lookup: { from: 'courses', localField: 'course', foreignField: '_id', as: 'courseInfo' } },
+      { $unwind: '$courseInfo' }
+    );
+
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    if (scopeFilter.department) {
+      pipeline.push({
+        $match: { 'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department) },
+      });
+    }
+
+    pipeline.push({ $lookup: { from: 'lecturers', localField: 'lecturer', foreignField: '_id', as: 'lecturerInfo' } });
+    pipeline.push({ $unwind: { path: '$lecturerInfo', preserveNullAndEmptyArrays: true } });
 
     const andFilters = [];
-    const eqMatch = {};
-    if (session)  eqMatch.session = session;
-    if (level)    eqMatch.level   = level;
-    if (semester) eqMatch.semester = parseInt(semester, 10);
-    if (courseCode) eqMatch['courseInfo.code'] = { $regex: courseCode, $options: 'i' };
-    if (regNo)      eqMatch['studentInfo.regNo'] = { $regex: regNo, $options: 'i' };
-    if (Object.keys(eqMatch).length) andFilters.push(eqMatch);
+    if (regNo) {
+      andFilters.push({ 'studentInfo.regNo': { $regex: regNo, $options: 'i' } });
+    }
+    if (courseCode) {
+      andFilters.push({ 'courseInfo.code': { $regex: courseCode, $options: 'i' } });
+    }
 
     pipeline.push({
       $addFields: {
@@ -293,12 +331,12 @@ export const getAllResults = async (req, res) => {
               $concat: [
                 { $ifNull: ['$studentInfo.surname', ''] }, ' ',
                 { $ifNull: ['$studentInfo.firstname', ''] }, ' ',
-                { $ifNull: ['$studentInfo.middlename', ''] }
-              ]
-            }
-          }
-        }
-      }
+                { $ifNull: ['$studentInfo.middlename', ''] },
+              ],
+            },
+          },
+        },
+      },
     });
 
     const term = (q || name || '').trim();
@@ -311,12 +349,14 @@ export const getAllResults = async (req, res) => {
           { 'studentInfo.surname': rx },
           { 'studentInfo.firstname': rx },
           { 'studentInfo.middlename': rx },
-          { fullName: rx }
-        ]
+          { fullName: rx },
+        ],
       });
     }
 
-    if (andFilters.length) pipeline.push({ $match: { $and: andFilters } });
+    if (andFilters.length) {
+      pipeline.push({ $match: { $and: andFilters } });
+    }
 
     pipeline.push({
       $addFields: {
@@ -325,48 +365,232 @@ export const getAllResults = async (req, res) => {
             input: { $arrayElemAt: [{ $split: ['$studentInfo.regNo', '/'] }, 1] },
             to: 'int',
             onError: 0,
-            onNull: 0
-          }
-        }
-      }
+            onNull: 0,
+          },
+        },
+      },
     });
 
-    pipeline.push({
+    const projectionStage = {
       $project: {
-        _id: 1, department: 1, session: 1, semester: 1, level: 1,
-        grade: 1, totalexam: 1, ca: 1, grandtotal: 1, moderated: 1,
-        moderationStatus: 1, moderationPendingGrandtotal: 1, moderationOriginalGrandtotal: 1, moderationApprovedAt: 1,
-        moderationProof: 1, moderationAuthorizedPfNo: 1,
-        q1: 1, q2: 1, q3: 1, q4: 1, q5: 1, q6: 1, q7: 1, q8: 1,
+        _id: 1,
+        department: 1,
+        session: 1,
+        semester: 1,
+        level: 1,
+        grade: 1,
+        totalexam: 1,
+        ca: 1,
+        grandtotal: 1,
+        moderated: 1,
+        moderationStatus: 1,
+        moderationPendingGrandtotal: 1,
+        moderationOriginalGrandtotal: 1,
+        moderationApprovedAt: 1,
+        moderationProof: 1,
+        moderationAuthorizedPfNo: 1,
+        q1: 1,
+        q2: 1,
+        q3: 1,
+        q4: 1,
+        q5: 1,
+        q6: 1,
+        q7: 1,
+        q8: 1,
+        createdAt: 1,
+        updatedAt: 1,
         student: {
           _id: '$studentInfo._id',
           surname: '$studentInfo.surname',
           firstname: '$studentInfo.firstname',
           middlename: '$studentInfo.middlename',
-          regNo: '$studentInfo.regNo'
+          regNo: '$studentInfo.regNo',
         },
         course: {
           _id: '$courseInfo._id',
           title: '$courseInfo.title',
           code: '$courseInfo.code',
-          unit: '$courseInfo.unit'
+          unit: '$courseInfo.unit',
         },
         lecturer: {
           _id: '$lecturerInfo._id',
           title: '$lecturerInfo.title',
           surname: '$lecturerInfo.surname',
-          firstname: '$lecturerInfo.firstname'
-        }
-      }
-    });
+          firstname: '$lecturerInfo.firstname',
+        },
+        regNoNumeric: 1,
+      },
+    };
 
-    pipeline.push({ $sort: { regNoNumeric: 1 } });
+    const sortStage = { $sort: { regNoNumeric: 1, _id: 1 } };
 
-    const results = await Result.aggregate(pipeline);
+    if (limit) {
+      pipeline.push({
+        $facet: {
+          data: [
+            sortStage,
+            { $skip: skip },
+            { $limit: limit },
+            projectionStage,
+          ],
+          totalCount: [
+            { $count: 'value' },
+          ],
+        },
+      });
+      pipeline.push({
+        $project: {
+          items: '$data',
+          total: {
+            $ifNull: [
+              { $arrayElemAt: ['$totalCount.value', 0] },
+              0,
+            ],
+          },
+        },
+      });
+
+      const aggregateResult = await Result.aggregate(pipeline).option({ allowDiskUse: true });
+      const doc = aggregateResult[0] || { items: [], total: 0 };
+      const items = doc.items || [];
+      const total = doc.total ?? items.length;
+      const pageCount = Math.max(1, Math.ceil((total || 0) / limit));
+
+      res.set('X-Total-Count', String(total));
+      res.set('X-Page', String(page));
+      res.set('X-Page-Size', String(limit));
+      res.set('X-Page-Count', String(pageCount));
+      return res.status(200).json(items);
+    }
+
+    pipeline.push(sortStage, projectionStage);
+    const results = await Result.aggregate(pipeline).option({ allowDiskUse: true });
     return res.status(200).json(results);
   } catch (error) {
     console.error("Error fetching results:", error);
     res.status(500).json({ message: "Server Error", error: error.message });
+  }
+};
+
+export const getResultsSummary = async (req, res) => {
+  try {
+    const { session, level, semester } = req.query;
+    const baseMatch = {};
+    if (session) baseMatch.session = String(session);
+    if (level) baseMatch.level = String(level);
+    if (semester) baseMatch.semester = Number(semester);
+
+    const pipeline = [];
+    if (Object.keys(baseMatch).length) {
+      pipeline.push({ $match: baseMatch });
+    }
+
+    pipeline.push({
+      $group: {
+        _id: {
+          course: '$course',
+          session: '$session',
+          semester: '$semester',
+          level: '$level',
+        },
+        resultsCount: { $sum: 1 },
+        department: { $first: '$department' },
+        college: { $first: '$college' },
+        lastUpdated: { $max: '$updatedAt' },
+        lecturerId: { $first: '$lecturer' },
+      },
+    });
+
+    pipeline.push(
+      { $lookup: { from: 'courses', localField: '_id.course', foreignField: '_id', as: 'courseInfo' } },
+      { $unwind: { path: '$courseInfo', preserveNullAndEmptyArrays: true } }
+    );
+
+    const scopeFilter = buildDepartmentScopeFilter(req.user);
+    if (scopeFilter.department) {
+      pipeline.push({
+        $match: { 'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department) },
+      });
+    }
+
+    pipeline.push(
+      { $lookup: { from: 'lecturers', localField: 'lecturerId', foreignField: '_id', as: 'lecturerInfo' } },
+      { $unwind: { path: '$lecturerInfo', preserveNullAndEmptyArrays: true } }
+    );
+
+    pipeline.push({
+      $project: {
+        _id: 0,
+        courseId: '$_id.course',
+        session: '$_id.session',
+        semester: '$_id.semester',
+        level: '$_id.level',
+        department: '$department',
+        departmentId: '$courseInfo.department',
+        college: '$college',
+        resultsCount: '$resultsCount',
+        lastUpdated: '$lastUpdated',
+        course: {
+          _id: '$courseInfo._id',
+          code: '$courseInfo.code',
+          title: '$courseInfo.title',
+          unit: '$courseInfo.unit',
+        },
+        lecturer: {
+          _id: '$lecturerInfo._id',
+          title: '$lecturerInfo.title',
+          surname: '$lecturerInfo.surname',
+          firstname: '$lecturerInfo.firstname',
+        },
+      },
+    });
+
+    pipeline.push({
+      $facet: {
+        items: [
+          { $sort: { session: -1, department: 1, level: 1, semester: 1, 'course.code': 1 } },
+        ],
+        stats: [
+          {
+            $group: {
+              _id: null,
+              totalResults: { $sum: '$resultsCount' },
+              totalCourses: { $sum: 1 },
+            },
+          },
+        ],
+      },
+    });
+
+    pipeline.push({
+      $project: {
+        items: '$items',
+        totalResults: {
+          $ifNull: [{ $arrayElemAt: ['$stats.totalResults', 0] }, 0],
+        },
+        totalCourses: {
+          $ifNull: [{ $arrayElemAt: ['$stats.totalCourses', 0] }, 0],
+        },
+      },
+    });
+
+    const aggregateResult = await Result.aggregate(pipeline).option({ allowDiskUse: true });
+    const doc = aggregateResult[0] || { items: [], totalResults: 0, totalCourses: 0 };
+    const items = doc.items || [];
+    const totalResults = doc.totalResults || 0;
+    const totalCourses = doc.totalCourses || 0;
+    const avgPerCourse = totalCourses ? Math.round(totalResults / totalCourses) : 0;
+
+    return res.status(200).json({
+      success: true,
+      items,
+      totalResults,
+      totalCourses,
+      avgPerCourse,
+    });
+  } catch (error) {
+    console.error('Error fetching results summary:', error);
+    res.status(500).json({ message: 'Server Error', error: error.message });
   }
 };
 

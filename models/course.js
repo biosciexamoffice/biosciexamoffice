@@ -1,7 +1,7 @@
 import mongoose, { Schema } from "mongoose";
 import { DEFAULT_COLLEGE } from "../constants/institutionDefaults.js";
 
-const courseSchema = Schema({
+const courseSchema = new Schema({
     title:{
         type: String,
         required: true
@@ -67,7 +67,7 @@ const courseSchema = Schema({
         trim: true,
     }
 
-})
+}, { timestamps: true });
 
 courseSchema.index({ programme: 1, level: 1, semester: 1 });
 

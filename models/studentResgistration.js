@@ -24,7 +24,7 @@ const studentRegistrationSchema = new Schema({
         required: true
     }
 
-})
+}, { timestamps: true });
 
 
 export default mongoose.model("StudentRegistration", studentRegistrationSchema);

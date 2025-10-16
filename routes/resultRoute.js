@@ -6,8 +6,9 @@ import {
     getResultById,
     updateResult,
     deleteResult,
-  deleteAllResultsForCourse,
-    deleteMultipleResults
+    deleteAllResultsForCourse,
+    deleteMultipleResults,
+    getResultsSummary
   } from "../controllers/resultController.js";
 
   import { uploadResults } from '../controllers/uploadResultController.js';
@@ -21,6 +22,7 @@ const resultRouter = express.Router();
 resultRouter.use(authenticate);
 
 resultRouter.post("/", createResult);
+resultRouter.get("/summary", getResultsSummary);
 resultRouter.get("/", getAllResults);
 
 // 🔁 Place before `/:id`

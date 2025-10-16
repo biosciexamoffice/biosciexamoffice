@@ -22,5 +22,6 @@ const CourseRegistrationSchema = new Schema({
 
 // ensure NO unique index on (course,session,semester) so multiple docs are allowed
 // CourseRegistrationSchema.index({ course: 1, session: 1, semester: 1 }, { unique: true });
+CourseRegistrationSchema.index({ student: 1, session: 1, semester: 1, level: 1 });
 
 export default mongoose.model('CourseRegistration', CourseRegistrationSchema);

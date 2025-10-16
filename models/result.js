@@ -112,6 +112,12 @@ const resultSchema = new Schema({
         type: String,
         default: ""
     }
-});
+}, { timestamps: true });
+
+resultSchema.index({ session: 1, semester: 1, level: 1 });
+resultSchema.index({ student: 1, session: 1, semester: 1, level: 1 });
+resultSchema.index({ course: 1, session: 1, semester: 1, level: 1 });
+resultSchema.index({ department: 1, session: 1, semester: 1, level: 1 });
+resultSchema.index({ createdAt: -1 });
 
 export default mongoose.model("Result", resultSchema);

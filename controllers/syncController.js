@@ -87,6 +87,21 @@ export const pullFromAtlas = async (_req, res) => {
     });
   }
 
+  if (typeof atlas.asPromise === 'function' && atlas.readyState !== 1) {
+    try {
+      await atlas.asPromise();
+    } catch (err) {
+      console.error('Atlas connection not ready:', err);
+    }
+  }
+
+  if (atlas.readyState !== 1) {
+    return res.status(503).json({
+      success: false,
+      message: 'Unable to reach Atlas cluster. Check network connectivity.',
+    });
+  }
+
   const state = await ensureSyncState();
   const since = state.lastPulledAt || new Date(0);
   const startedAt = new Date();
@@ -133,8 +148,24 @@ export const pushToAtlas = async (_req, res) => {
     });
   }
 
+  if (typeof atlas.asPromise === 'function' && atlas.readyState !== 1) {
+    try {
+      await atlas.asPromise();
+    } catch (err) {
+      console.error('Atlas connection not ready:', err);
+    }
+  }
+
+  if (atlas.readyState !== 1) {
+    return res.status(503).json({
+      success: false,
+      message: 'Unable to reach Atlas cluster. Check network connectivity.',
+    });
+  }
+
   const state = await ensureSyncState();
   const since = state.lastPushedAt || new Date(0);
+  const isFullExport = !state.lastPushedAt || state.lastPushedAt.getTime() === new Date(0).getTime();
   const startedAt = new Date();
   const primaryDb = mongoose.connection;
   const summary = [];
@@ -146,6 +177,49 @@ export const pushToAtlas = async (_req, res) => {
       continue;
     }
 
+    let shouldRunFull = isFullExport;
+    let fullReason = isFullExport ? 'bootstrap' : undefined;
+
+    if (!shouldRunFull) {
+      try {
+        const [localCount, atlasCount] = await Promise.all([
+          primaryCollection.estimatedDocumentCount(),
+          atlasCollection.estimatedDocumentCount(),
+        ]);
+        if (localCount !== atlasCount) {
+          shouldRunFull = true;
+          if (atlasCount === 0 && localCount > 0) {
+            fullReason = 'atlas-empty';
+          } else if (atlasCount < localCount) {
+            fullReason = 'atlas-missing-docs';
+          } else if (atlasCount > localCount) {
+            fullReason = 'atlas-extra-docs';
+          } else {
+            fullReason = 'count-mismatch';
+          }
+        }
+      } catch (countError) {
+        console.warn(`Sync warning (${key}): unable to compare counts before push`, countError);
+        shouldRunFull = true;
+        fullReason = 'atlas-missing-collection';
+      }
+    }
+
+    if (shouldRunFull) {
+      const allDocs = await primaryCollection.find({}).toArray();
+      await atlasCollection.deleteMany({});
+      if (allDocs.length) {
+        await atlasCollection.insertMany(allDocs, { ordered: false });
+      }
+      summary.push({
+        collection: key,
+        exported: allDocs.length,
+        mode: 'full',
+        ...(fullReason ? { reason: fullReason } : {}),
+      });
+      continue;
+    }
+
     const freshDocs = await primaryCollection.find(PICK_UPDATED_QUERY(since)).toArray();
     if (!freshDocs.length) {
       continue;
@@ -154,8 +228,17 @@ export const pushToAtlas = async (_req, res) => {
     const ops = buildBulkOps(freshDocs);
     if (!ops.length) continue;
 
-    await atlasCollection.bulkWrite(ops, { ordered: false });
-    summary.push({ collection: key, exported: ops.length });
+    try {
+      await atlasCollection.bulkWrite(ops, { ordered: false });
+      summary.push({ collection: key, exported: ops.length });
+    } catch (error) {
+      if (error?.code === 11000) {
+        console.warn(`Sync warning (${key}): duplicate key encountered. Consider running a full export to align records.`);
+        summary.push({ collection: key, exported: ops.length, warning: 'duplicate-key' });
+        continue;
+      }
+      throw error;
+    }
   }
 
   state.lastPushedAt = startedAt;
