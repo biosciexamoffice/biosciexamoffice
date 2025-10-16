@@ -343,40 +343,106 @@ export const getComprehensiveResults = async (req, res) => {
       (existingMetricsDocs || []).map((m) => [String(m.student), m])
     );
 
+    const missingStudentIds = [];
     for (const sid of regByStudent.keys()) {
-      if (metricsByStudent.has(sid)) continue; // reuse existing metrics
+      if (!metricsByStudent.has(sid)) {
+        missingStudentIds.push(sid);
+      }
+    }
 
+    let previousMetricsByStudent = new Map();
+    if (missingStudentIds.length) {
+      const previousDocs = await AcademicMetrics.find({
+        student: { $in: missingStudentIds },
+        $nor: [
+          { session, semester: semNum, level: lvlNum },
+        ],
+      })
+        .select('student session semester CCC CCE CPE CGPA')
+        .lean();
+
+      previousMetricsByStudent = previousDocs.reduce((map, doc) => {
+        const sid = String(doc.student);
+        if (!isBeforeTerm(doc.session, doc.semester, session, semNum)) {
+          return map;
+        }
+        const existing = map.get(sid);
+        if (!existing || isBeforeTerm(existing.session, existing.semester, doc.session, doc.semester)) {
+          map.set(sid, {
+            session: doc.session,
+            semester: doc.semester,
+            CCC: Number(doc.CCC || 0),
+            CCE: Number(doc.CCE || 0),
+            CPE: Number(doc.CPE || 0),
+            CGPA: Number(doc.CGPA || 0),
+          });
+        }
+        return map;
+      }, new Map());
+    }
+
+    const metricsBulkOps = [];
+    const metricsNeedingRefresh = new Set();
+    const now = new Date();
+
+    for (const sid of missingStudentIds) {
       const attempted = makeAttemptedFor(sid);
       if (!attempted.length) {
-        // No registrations -> ensure no stale doc exists
-        await AcademicMetrics.deleteOne({ student: sid, session, semester: semNum, level: lvlNum });
         continue;
       }
 
-      // Use your robust previous-term helper (session/semester ordering is correct)
-      const previousMetrics = await findPreviousMetrics(sid, session, semNum);
+      const prev = previousMetricsByStudent.get(sid) || { CCC: 0, CCE: 0, CPE: 0, CGPA: 0 };
+      const previousMetrics = {
+        CCC: prev.CCC || 0,
+        CCE: prev.CCE || 0,
+        CPE: prev.CPE || 0,
+        CGPA: prev.CGPA || 0,
+      };
+
       const current = calculateAcademicMetrics(attempted, previousMetrics);
 
-      // Create-once: set computed fields on insert only (preserve later manual edits)
-      const created = await AcademicMetrics.findOneAndUpdate(
-        { student: sid, session, semester: semNum, level: lvlNum },
-        {
-          $set: { previousMetrics, lastUpdated: new Date() },
-          $setOnInsert: {
-            TCC: current.TCC,
-            TCE: current.TCE,
-            TPE: current.TPE,
-            GPA: current.GPA,
-            CCC: current.CCC,
-            CCE: current.CCE,
-            CPE: current.CPE,
-            CGPA: current.CGPA,
+      metricsBulkOps.push({
+        updateOne: {
+          filter: { student: sid, session, semester: semNum, level: lvlNum },
+          update: {
+            $set: {
+              previousMetrics,
+              lastUpdated: now,
+            },
+            $setOnInsert: {
+              TCC: current.TCC,
+              TCE: current.TCE,
+              TPE: current.TPE,
+              GPA: current.GPA,
+              CCC: current.CCC,
+              CCE: current.CCE,
+              CPE: current.CPE,
+              CGPA: current.CGPA,
+            },
           },
+          upsert: true,
         },
-        { new: true, upsert: true }
-      ).lean();
+      });
+      metricsNeedingRefresh.add(sid);
+    }
 
-      metricsByStudent.set(sid, created);
+    if (metricsBulkOps.length) {
+      await AcademicMetrics.bulkWrite(metricsBulkOps, { ordered: false });
+    }
+
+    if (metricsNeedingRefresh.size) {
+      const refreshedDocs = await AcademicMetrics.find({
+        student: { $in: [...metricsNeedingRefresh] },
+        session,
+        semester: semNum,
+        level: lvlNum,
+      })
+        .select('student TCC TCE TPE GPA CCC CCE CPE CGPA previousMetrics ceoApproval hodApproval deanApproval')
+        .lean();
+
+      refreshedDocs.forEach((doc) => {
+        metricsByStudent.set(String(doc.student), doc);
+      });
     }
 
     // 7) Build students array (registered students only), attach metrics & strictly registered results
