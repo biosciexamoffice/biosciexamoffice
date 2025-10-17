@@ -123,16 +123,28 @@ export const CreateStudent = async (req, res) => {
       departmentId,
       programmeId,
       ...studentPayload
-    } = req.body || {};
+    } = req.body || {}; // This destructuring is correct for the incoming payload
+console.log(req.body)
+    // Add validation to ensure IDs are present before proceeding
+    if (
+      !collegeId || collegeId === '' || !mongoose.Types.ObjectId.isValid(collegeId) ||
+      !departmentId || departmentId === '' || !mongoose.Types.ObjectId.isValid(departmentId) ||
+      !programmeId || programmeId === '' || !mongoose.Types.ObjectId.isValid(programmeId)
+    ) {
+      return res.status(400).json({
+        error: "Validation Error",
+        details: "A valid College, Department, and Programme must be selected.",
+      });
+    }
 
+    // Re-fetch the documents to pass to the access control function.
     const { college, department, programme } = await validateInstitutionHierarchy({
       collegeId,
       departmentId,
       programmeId,
     });
-
     ensureUserCanAccessDepartment(req.user, department._id, college._id);
-
+console.log(req.user)
     const newStudent = await Student.create({
       ...studentPayload,
       college: college._id,

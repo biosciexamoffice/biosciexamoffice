@@ -29,8 +29,14 @@ const connectDB = async () => {
       console.warn('MONGO_PRIMARY_URL/MONGO_URL not set. Falling back to mongodb://127.0.0.1:27017/examoffice');
     }
 
-    const dbName = process.env.MONGO_DB_NAME || 'exam-office';
-    const atlasDbName = process.env.MONGO_ATLAS_DB_NAME || dbName;
+    const dbName =
+      typeof process.env.MONGO_DB_NAME === 'string' && process.env.MONGO_DB_NAME.trim()
+        ? process.env.MONGO_DB_NAME.trim()
+        : undefined;
+    const atlasDbName =
+      typeof process.env.MONGO_ATLAS_DB_NAME === 'string' && process.env.MONGO_ATLAS_DB_NAME.trim()
+        ? process.env.MONGO_ATLAS_DB_NAME.trim()
+        : dbName;
 
     const commonOptions = {
       maxPoolSize: Number(process.env.MONGO_POOL_SIZE || 10),
@@ -39,16 +45,19 @@ const connectDB = async () => {
     };
 
     const readPreference = isReadOnlyMode() ? 'secondaryPreferred' : 'primary';
-    await mongoose.connect(primaryUri, { ...commonOptions, readPreference, dbName });
+    const mongooseOptions = { ...commonOptions, readPreference };
+    if (dbName) mongooseOptions.dbName = dbName;
+
+    await mongoose.connect(primaryUri, mongooseOptions);
     console.log(
       `MongoDB connected (${getDbMode()} mode) -> ${redactConnectionString(primaryUri)}`
     );
 
     if (!isReadOnlyMode() && process.env.MONGO_ATLAS_URL) {
-      atlasConnection = mongoose.createConnection(process.env.MONGO_ATLAS_URL, {
-        ...commonOptions,
-        dbName: atlasDbName,
-      });
+      const atlasOptions = { ...commonOptions };
+      if (atlasDbName) atlasOptions.dbName = atlasDbName;
+
+      atlasConnection = mongoose.createConnection(process.env.MONGO_ATLAS_URL, atlasOptions);
       await atlasConnection.asPromise();
       console.log(
         `MongoDB Atlas backup connection ready -> ${redactConnectionString(process.env.MONGO_ATLAS_URL)}`

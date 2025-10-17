@@ -211,6 +211,10 @@ export const createDepartment = async (req, res) => {
 
   try {
     const department = await Department.create(payload);
+
+    college.departments.push(department._id);
+    await college.save();
+
     res.status(201).json({
       success: true,
       department: {

@@ -23,8 +23,20 @@ export const createApprovedCourses = async (req, res) => {
     let { collegeId, departmentId, programmeId, session, semester, level, courses } = req.body || {};
 
     // Basic validation
-    if (!collegeId || !departmentId || !programmeId || !session || semester == null || level == null || !Array.isArray(courses) || courses.length === 0) {
-      return res.status(400).json({ message: 'collegeId, departmentId, programmeId, session, semester, level, and a non-empty courses[] are required.' });
+    if (
+      !collegeId ||
+      !departmentId ||
+      !programmeId ||
+      !session ||
+      semester == null ||
+      level == null ||
+      !Array.isArray(courses) ||
+      courses.length === 0
+    ) {
+      return res.status(400).json({
+        message:
+          'collegeId, departmentId, programmeId, session, semester, level, and a non-empty courses[] are required.',
+      });
     }
 
     // Normalize numeric fields
@@ -87,9 +99,13 @@ export const createApprovedCourses = async (req, res) => {
 
     return res.status(201).json(populated);
   } catch (error) {
-    // NOTE: Your schema index is not unique; if you want to block duplicates, set { unique: true } on (college, session, semester, level)
+    // NOTE: To block exact duplicates while allowing same session in same department with different programme/semester/level,
+    // add a compound unique index on (college, department, programme, session, semester, level) in the ApprovedCourses model.
     if (error.code === 11000) {
-      return res.status(400).json({ message: 'Approved courses already exist for this combination' });
+      return res.status(400).json({
+        message:
+          'Approved courses already exist for this college/department/programme in the same session, semester, and level.',
+      });
     }
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -102,12 +118,12 @@ export const getApprovedCourses = async (req, res) => {
     const collegeFilter = req.query.collegeId || req.query.college;
     const departmentFilter = req.query.departmentId || req.query.department;
     const programmeFilter = req.query.programmeId || req.query.programme;
-    if (collegeFilter)  filter.college = collegeFilter;
+    if (collegeFilter) filter.college = collegeFilter;
     if (departmentFilter) filter.department = departmentFilter;
     if (programmeFilter) filter.programme = programmeFilter;
-    if (req.query.session)  filter.session = req.query.session;
+    if (req.query.session) filter.session = req.query.session;
     if (req.query.semester != null) filter.semester = Number(req.query.semester);
-    if (req.query.level != null)    filter.level = Number(req.query.level);
+    if (req.query.level != null) filter.level = Number(req.query.level);
 
     const scopeFilter = buildDepartmentScopeFilter(req.user);
     Object.assign(filter, scopeFilter);
@@ -205,7 +221,7 @@ export const updateApprovedCourses = async (req, res) => {
       $set.programmeName = programme.name;
     }
 
-    if (session != null)  $set.session = session;
+    if (session != null) $set.session = session;
     if (semester != null) {
       const semNum = Number(semester);
       if (![1, 2].includes(semNum)) {
@@ -220,13 +236,9 @@ export const updateApprovedCourses = async (req, res) => {
       }
       $set.level = lvlNum;
     }
-    if (courses != null)  $set.courses = courses;
+    if (courses != null) $set.courses = courses;
 
-    const updated = await ApprovedCourses.findByIdAndUpdate(
-      req.params.id,
-      { $set },
-      { new: true }
-    )
+    const updated = await ApprovedCourses.findByIdAndUpdate(req.params.id, { $set }, { new: true })
       .populate(APPROVED_COURSE_POPULATE)
       .lean();
 

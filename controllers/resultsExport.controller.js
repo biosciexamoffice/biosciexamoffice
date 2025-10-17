@@ -1,6 +1,8 @@
+import mongoose from "mongoose";
 import Result from "../models/result.js";
 import Course from "../models/course.js";
 import Student from "../models/student.js";
+import { buildDepartmentScopeFilter } from "../services/accessControl.js";
 
 /**
  * One-time (or on-boot) helper to ensure indexes that make export queries fast.
@@ -52,6 +54,24 @@ export async function listForExport(req, res) {
         }
       }
     ];
+
+    let scopeFilter = {};
+    try {
+      scopeFilter = buildDepartmentScopeFilter(req.user);
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+      throw error;
+    }
+
+    if (scopeFilter.department) {
+      pipeline.push({
+        $match: {
+          'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department),
+        },
+      });
+    }
 
     const matchStage = {};
     if (session) matchStage.session = session;
@@ -117,6 +137,9 @@ export async function listForExport(req, res) {
 
     res.status(200).json(rows);
   } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ message: err.message });
+    }
     console.error('listForExport error:', err);
     res.status(500).json({ message: 'Server Error', error: err.message });
   }
@@ -144,6 +167,24 @@ export async function exportHealth(req, res) {
         }
       }
     ];
+
+    let scopeFilter = {};
+    try {
+      scopeFilter = buildDepartmentScopeFilter(req.user);
+    } catch (error) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+      throw error;
+    }
+
+    if (scopeFilter.department) {
+      pipeline.push({
+        $match: {
+          'courseInfo.department': new mongoose.Types.ObjectId(scopeFilter.department),
+        },
+      });
+    }
 
     // Build as AND conditions so we can include OR groups without clobbering
     const andConds = [];
@@ -198,6 +239,9 @@ export async function exportHealth(req, res) {
       coursesWithIssues: issues
     });
   } catch (err) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ message: err.message });
+    }
     console.error('exportHealth error:', err);
     res.status(500).json({ message: 'Server Error', error: err.message });
   }

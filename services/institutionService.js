@@ -113,22 +113,6 @@ export const validateInstitutionHierarchy = async ({
   departmentId,
   programmeId,
 }) => {
-  if (!collegeId || !mongoose.Types.ObjectId.isValid(collegeId)) {
-    const error = new Error('Valid collegeId is required.');
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!departmentId || !mongoose.Types.ObjectId.isValid(departmentId)) {
-    const error = new Error('Valid departmentId is required.');
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!programmeId || !mongoose.Types.ObjectId.isValid(programmeId)) {
-    const error = new Error('Valid programmeId is required.');
-    error.statusCode = 400;
-    throw error;
-  }
-
   const [college, department, programme] = await Promise.all([
     College.findById(collegeId),
     Department.findById(departmentId),

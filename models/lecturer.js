@@ -26,10 +26,26 @@ const lecturerSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    department:{
-        type: String,
-        required: true
-    },
+    college: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'College',
+        required: true,
+        index: true,
+      },
+      department: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Department',
+        required: true,
+        index: true,
+      },
 }, { timestamps: true });
+
+lecturerSchema.virtual('name').get(function() {
+  const parts = [this.title, this.surname, this.firstname, this.middlename];
+  return parts.filter(Boolean).join(' ');
+});
+
+lecturerSchema.set('toObject', { virtuals: true });
+lecturerSchema.set('toJSON', { virtuals: true });
 
 export default mongoose.model('Lecturer', lecturerSchema);

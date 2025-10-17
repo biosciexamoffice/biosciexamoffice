@@ -5,7 +5,12 @@ const officerSnapshotSchema = new Schema(
     lecturer: { type: Schema.Types.ObjectId, ref: "Lecturer", required: true },
     name: { type: String, required: true, trim: true },
     pfNo: { type: String, required: true, trim: true },
-    department: { type: String, required: true, trim: true },
+    department: {
+      type: Schema.Types.ObjectId,
+      ref: 'Department',
+      required: true,
+    },
+    college: { type: Schema.Types.ObjectId, ref: 'College', required: true },
     title: { type: String, trim: true },
     rank: { type: String, trim: true },
   },
@@ -67,6 +72,18 @@ const sessionSchema = new Schema(
       ref: "Lecturer",
       required: [true, "EO is required!"],
     },
+    college: {
+        type: Schema.Types.ObjectId,
+        ref: 'College',
+        required: true,
+        index: true,
+      },
+      department: {
+        type: Schema.Types.ObjectId,
+        ref: 'Department',
+        required: true,
+        index: true,
+      },
     principalOfficers: {
       dean: { type: officerSnapshotSchema, required: true },
       hod: { type: officerSnapshotSchema, required: true },

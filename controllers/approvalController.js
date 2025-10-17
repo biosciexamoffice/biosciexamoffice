@@ -18,6 +18,9 @@ const normalizeApproval = (approval = {}) => ({
 });
 
 const ROLE_CONFIG = {
+  EXAM_OFFICER: {
+    filter: { 'ceoApproval.approved': { $ne: true } },
+  },
   COLLEGE_OFFICER: {
     filter: { 'ceoApproval.approved': { $ne: true } },
   },
@@ -92,21 +95,15 @@ export const getPendingApprovals = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Forbidden.' });
     }
 
-  const match = { ...config.filter };
+  const departmentScopeFilter = buildDepartmentScopeFilter(req.user);
+
+  const match = {
+    ...config.filter,
+    ...departmentScopeFilter,
+  };
   if (req.query.session) match.session = req.query.session;
   if (req.query.semester) match.semester = Number(req.query.semester);
   if (req.query.level) match.level = Number(req.query.level);
-
-  const departmentScopeId = roleParam === 'HOD' && req.user?.departmentId
-    ? String(req.user.departmentId)
-    : '';
-  const departmentScopeName = roleParam === 'HOD' && req.user?.department
-    ? String(req.user.department).trim().toLowerCase()
-    : '';
-
-  if (roleParam === 'HOD' && !departmentScopeId && !departmentScopeName) {
-    return res.status(403).json({ success: false, message: 'Department assignment required for HOD approvals.' });
-  }
 
   let metricsQuery = AcademicMetrics.find(match)
     .populate({
@@ -125,62 +122,10 @@ export const getPendingApprovals = async (req, res) => {
 
     const metricsDocs = await metricsQuery.lean();
 
-    const normalizeDeptId = (value) => {
-      if (!value) return null;
-      if (value._id) return String(value._id);
-      if (typeof value === 'object' && typeof value.toString === 'function') {
-        return String(value.toString());
-      }
-      return String(value);
-    };
-
-    const normalizeDeptName = (value) => {
-      if (!value) return '';
-      if (typeof value === 'string') return value.trim().toLowerCase();
-      if (value.name) return String(value.name).trim().toLowerCase();
-      if (typeof value === 'object' && typeof value.toString === 'function') {
-        return String(value.toString()).trim().toLowerCase();
-      }
-      return '';
-    };
-
-    const departmentFilter =
-      roleParam === 'HOD'
-        ? {
-            id: departmentScopeId || null,
-            name: departmentScopeName || '',
-          }
-        : null;
-
-    const filteredMetrics = departmentFilter
-      ? metricsDocs.filter((metrics) => {
-          const candidateDepartments = [
-            metrics.student?.department,
-            metrics.department,
-          ];
-
-          return candidateDepartments.some((value) => {
-            if (!value) return false;
-            const deptId = normalizeDeptId(value);
-            const deptName = normalizeDeptName(value);
-
-            if (departmentFilter.id && deptId && deptId === departmentFilter.id) {
-              return true;
-            }
-
-            if (departmentFilter.name && deptName && deptName === departmentFilter.name) {
-              return true;
-            }
-
-            return false;
-          });
-        })
-      : metricsDocs;
-
     const comboList = [];
     const seenCombos = new Set();
 
-    filteredMetrics.forEach((metrics) => {
+    metricsDocs.forEach((metrics) => {
       const studentId = metrics.student?._id;
       if (!studentId) return;
       const sessionValue = metrics.session;
@@ -246,12 +191,10 @@ export const getPendingApprovals = async (req, res) => {
     }
 
     const items = await Promise.all(
-      filteredMetrics.map(async (metrics) => {
+      metricsDocs.map(async (metrics) => {
         const studentId = metrics.student?._id;
         const studentDeptDoc = metrics.student?.department;
         const studentCollegeDoc = metrics.student?.college;
-        const studentDepartmentId = normalizeDeptId(studentDeptDoc);
-        const metricsDepartmentName = normalizeDeptName(metrics.department);
         const departmentName =
           metrics.department ||
           studentDeptDoc?.name ||
@@ -260,35 +203,6 @@ export const getPendingApprovals = async (req, res) => {
           metrics.college ||
           studentCollegeDoc?.name ||
           (typeof studentCollegeDoc === 'string' ? studentCollegeDoc : null);
-        const matchesDepartment = (deptValue) => {
-          if (!departmentFilter) return true;
-          const deptId = normalizeDeptId(deptValue);
-          const deptName = normalizeDeptName(deptValue);
-          if (departmentFilter.id && deptId && deptId === departmentFilter.id) {
-            return true;
-          }
-          if (departmentFilter.name && deptName && deptName === departmentFilter.name) {
-            return true;
-          }
-          if (
-            departmentFilter.id &&
-            studentDepartmentId &&
-            studentDepartmentId === departmentFilter.id
-          ) {
-            return true;
-          }
-          if (
-            departmentFilter.name &&
-            studentDeptDoc &&
-            normalizeDeptName(studentDeptDoc) === departmentFilter.name
-          ) {
-            return true;
-          }
-          if (departmentFilter.name && metricsDepartmentName && metricsDepartmentName === departmentFilter.name) {
-            return true;
-          }
-          return false;
-        };
         let courses = [];
 
         if (studentId) {
@@ -296,13 +210,9 @@ export const getPendingApprovals = async (req, res) => {
           const resultsRaw = resultsByKey.get(comboKey) || [];
           const registrationsRaw = registrationsByKey.get(comboKey) || [];
 
-          const results = departmentFilter
-            ? resultsRaw.filter((result) => matchesDepartment(result.course?.department))
-            : resultsRaw;
-
-          const registrations = departmentFilter
-            ? registrationsRaw.filter((registration) => matchesDepartment(registration.course?.department))
-            : registrationsRaw;
+          // No need to re-filter here, as the main query is already scoped
+          const results = resultsRaw;
+          const registrations = registrationsRaw;
 
           const resultMap = new Map();
           results.forEach((result) => {
